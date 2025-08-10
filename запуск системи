@@ -1,0 +1,10 @@
+# Демонстрація всіх можливостей
+python ground_control_center.py demo
+
+# Інтерактивний режим для операторів
+python ground_control_center.py interactive
+
+# Програмний доступ
+from ground_control_center import GroundControlCenter
+gcc = GroundControlCenter()
+gcc.start()
