@@ -1,0 +1,1415 @@
+#!/usr/bin/env python3
+"""
+Наземний центр управління роєм дронів з когнітивними сервісами
+Архітектура включає: планування місій, симуляції, аналіз телеметрії, цифровий двійник
+"""
+
+import asyncio
+import json
+import time
+import numpy as np
+import sqlite3
+import threading
+import uuid
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Tuple, Any, Callable
+from enum import Enum
+from datetime import datetime
+import logging
+import pickle
+import os
+from abc import ABC, abstractmethod
+import queue
+import matplotlib.pyplot as plt
+import seaborn as sns
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
+# Налаштування логування
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==================== БАЗОВІ СТРУКТУРИ ДАНИХ ====================
+
+class MissionStatus(Enum):
+    PLANNED = "planned"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+class DroneRole(Enum):
+    SCOUT = "scout"
+    ATTACKER = "attacker"
+    DEFENDER = "defender"
+    SUPPORT = "support"
+    LEADER = "leader"
+
+class EnvironmentType(Enum):
+    URBAN = "urban"
+    RURAL = "rural"
+    MOUNTAINOUS = "mountainous"
+    COASTAL = "coastal"
+    DESERT = "desert"
+
+@dataclass
+class Position3D:
+    x: float
+    y: float
+    z: float
+    
+    def distance_to(self, other: 'Position3D') -> float:
+        return np.sqrt((self.x - other.x)**2 + (self.y - other.y)**2 + (self.z - other.z)**2)
+    
+    def to_dict(self):
+        return {"x": self.x, "y": self.y, "z": self.z}
+
+@dataclass
+class Waypoint:
+    position: Position3D
+    speed: float = 5.0
+    action: str = "move"
+    parameters: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ThreatZone:
+    center: Position3D
+    radius: float
+    threat_level: float
+    threat_type: str
+    active_time: Optional[Tuple[float, float]] = None
+
+@dataclass
+class MissionParameters:
+    mission_id: str
+    mission_type: str
+    priority: int
+    start_time: datetime
+    estimated_duration: int  # в секундах
+    target_area: List[Position3D]
+    waypoints: List[Waypoint]
+    drone_count: int
+    formation_type: str
+    environment: EnvironmentType
+    weather_conditions: Dict[str, Any]
+    threat_zones: List[ThreatZone]
+    success_criteria: Dict[str, Any]
+
+@dataclass
+class TelemetryData:
+    timestamp: datetime
+    drone_id: str
+    position: Position3D
+    velocity: Tuple[float, float, float]
+    battery_level: float
+    state: str
+    sensor_data: Dict[str, Any]
+    decisions_made: List[str]
+    communication_log: List[Dict[str, Any]]
+
+# ==================== БАЗА ЗНАНЬ ====================
+
+class KnowledgeBase:
+    """Централізована база знань для накопичення досвіду роботи рою"""
+    
+    def __init__(self, db_path: str = "swarm_knowledge.db"):
+        self.db_path = db_path
+        self.connection = None
+        self._init_database()
+    
+    def _init_database(self):
+        """Ініціалізація бази даних"""
+        self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+        cursor = self.connection.cursor()
+        
+        # Таблиця місій
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS missions (
+                mission_id TEXT PRIMARY KEY,
+                mission_type TEXT,
+                status TEXT,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                parameters TEXT,
+                success_rate REAL,
+                lessons_learned TEXT
+            )
+        ''')
+        
+        # Таблиця телеметрії
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mission_id TEXT,
+                drone_id TEXT,
+                timestamp TIMESTAMP,
+                position_x REAL,
+                position_y REAL,
+                position_z REAL,
+                battery_level REAL,
+                state TEXT,
+                sensor_data TEXT,
+                FOREIGN KEY (mission_id) REFERENCES missions (mission_id)
+            )
+        ''')
+        
+        # Таблиця рішень
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mission_id TEXT,
+                drone_id TEXT,
+                timestamp TIMESTAMP,
+                decision_type TEXT,
+                context TEXT,
+                outcome TEXT,
+                effectiveness_score REAL,
+                FOREIGN KEY (mission_id) REFERENCES missions (mission_id)
+            )
+        ''')
+        
+        # Таблиця моделей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS models (
+                model_id TEXT PRIMARY KEY,
+                model_name TEXT,
+                version TEXT,
+                performance_metrics TEXT,
+                training_data TEXT,
+                created_at TIMESTAMP,
+                is_active BOOLEAN
+            )
+        ''')
+        
+        self.connection.commit()
+    
+    def store_mission(self, mission: MissionParameters, status: MissionStatus):
+        """Збереження інформації про місію"""
+        cursor = self.connection.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO missions 
+            (mission_id, mission_type, status, start_time, parameters)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            mission.mission_id,
+            mission.mission_type,
+            status.value,
+            mission.start_time,
+            json.dumps(asdict(mission), default=str)
+        ))
+        self.connection.commit()
+    
+    def store_telemetry(self, telemetry: TelemetryData):
+        """Збереження телеметричних даних"""
+        cursor = self.connection.cursor()
+        cursor.execute('''
+            INSERT INTO telemetry 
+            (mission_id, drone_id, timestamp, position_x, position_y, position_z, 
+             battery_level, state, sensor_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            telemetry.drone_id.split('_')[0],  # припускаємо формат mission_id_drone_id
+            telemetry.drone_id,
+            telemetry.timestamp,
+            telemetry.position.x,
+            telemetry.position.y,
+            telemetry.position.z,
+            telemetry.battery_level,
+            telemetry.state,
+            json.dumps(telemetry.sensor_data)
+        ))
+        self.connection.commit()
+    
+    def get_mission_statistics(self, mission_type: str = None) -> Dict[str, Any]:
+        """Отримання статистики місій"""
+        cursor = self.connection.cursor()
+        
+        if mission_type:
+            cursor.execute('''
+                SELECT status, COUNT(*), AVG(success_rate)
+                FROM missions 
+                WHERE mission_type = ?
+                GROUP BY status
+            ''', (mission_type,))
+        else:
+            cursor.execute('''
+                SELECT status, COUNT(*), AVG(success_rate)
+                FROM missions 
+                GROUP BY status
+            ''')
+        
+        results = cursor.fetchall()
+        stats = {}
+        for status, count, avg_success in results:
+            stats[status] = {
+                'count': count,
+                'average_success_rate': avg_success or 0.0
+            }
+        
+        return stats
+    
+    def get_historical_data(self, mission_type: str, limit: int = 100) -> List[Dict]:
+        """Отримання історичних даних для навчання"""
+        cursor = self.connection.cursor()
+        cursor.execute('''
+            SELECT parameters, success_rate, lessons_learned
+            FROM missions 
+            WHERE mission_type = ? AND status = 'completed'
+            LIMIT ?
+        ''', (mission_type, limit))
+        
+        results = []
+        for params, success_rate, lessons in cursor.fetchall():
+            results.append({
+                'parameters': json.loads(params),
+                'success_rate': success_rate,
+                'lessons_learned': lessons
+            })
+        
+        return results
+
+# ==================== МОДУЛЬ ПЛАНУВАННЯ МІСІЇ ====================
+
+class MissionPlanner:
+    """Модуль програмування та планування місій"""
+    
+    def __init__(self, knowledge_base: KnowledgeBase):
+        self.knowledge_base = knowledge_base
+        self.mission_templates = self._load_mission_templates()
+        self.optimization_algorithms = {
+            'genetic': self._genetic_optimization,
+            'particle_swarm': self._pso_optimization,
+            'simulated_annealing': self._sa_optimization
+        }
+    
+    def _load_mission_templates(self) -> Dict[str, Dict]:
+        """Завантаження шаблонів місій"""
+        return {
+            'reconnaissance': {
+                'default_formation': 'line',
+                'default_speed': 5.0,
+                'default_altitude': 50.0,
+                'required_sensors': ['camera', 'lidar'],
+                'min_drones': 2,
+                'max_drones': 8
+            },
+            'patrol': {
+                'default_formation': 'circle',
+                'default_speed': 3.0,
+                'default_altitude': 30.0,
+                'required_sensors': ['camera', 'thermal'],
+                'min_drones': 3,
+                'max_drones': 12
+            },
+            'search_and_rescue': {
+                'default_formation': 'spread',
+                'default_speed': 4.0,
+                'default_altitude': 25.0,
+                'required_sensors': ['camera', 'thermal', 'audio'],
+                'min_drones': 4,
+                'max_drones': 16
+            }
+        }
+    
+    def create_mission(self, 
+                      mission_type: str,
+                      target_area: List[Position3D],
+                      drone_count: int,
+                      priority: int = 1,
+                      custom_parameters: Dict[str, Any] = None) -> MissionParameters:
+        """Створення нової місії"""
+        
+        mission_id = f"mission_{uuid.uuid4().hex[:8]}"
+        template = self.mission_templates.get(mission_type, {})
+        
+        # Генерація waypoints на основі цільової області
+        waypoints = self._generate_waypoints(target_area, mission_type, template)
+        
+        # Створення зон загроз (приклад)
+        threat_zones = self._identify_threat_zones(target_area)
+        
+        # Прогноз погоди (симуляція)
+        weather = self._get_weather_forecast(target_area[0] if target_area else Position3D(0, 0, 0))
+        
+        mission = MissionParameters(
+            mission_id=mission_id,
+            mission_type=mission_type,
+            priority=priority,
+            start_time=datetime.now(),
+            estimated_duration=self._estimate_duration(waypoints, template.get('default_speed', 5.0)),
+            target_area=target_area,
+            waypoints=waypoints,
+            drone_count=drone_count,
+            formation_type=template.get('default_formation', 'line'),
+            environment=self._classify_environment(target_area),
+            weather_conditions=weather,
+            threat_zones=threat_zones,
+            success_criteria=self._define_success_criteria(mission_type)
+        )
+        
+        # Збереження в базу знань
+        self.knowledge_base.store_mission(mission, MissionStatus.PLANNED)
+        
+        logger.info(f"Створено місію {mission_id} типу {mission_type}")
+        return mission
+    
+    def optimize_mission_parameters(self, mission: MissionParameters, algorithm: str = 'genetic') -> MissionParameters:
+        """Оптимізація параметрів місії"""
+        
+        if algorithm not in self.optimization_algorithms:
+            logger.warning(f"Алгоритм {algorithm} не підтримується. Використовується genetic.")
+            algorithm = 'genetic'
+        
+        # Отримання історичних даних для оптимізації
+        historical_data = self.knowledge_base.get_historical_data(mission.mission_type)
+        
+        # Запуск оптимізації
+        optimized_params = self.optimization_algorithms[algorithm](mission, historical_data)
+        
+        # Оновлення параметрів місії
+        optimized_mission = self._apply_optimizations(mission, optimized_params)
+        
+        logger.info(f"Оптимізовано параметри місії {mission.mission_id} алгоритмом {algorithm}")
+        return optimized_mission
+    
+    def _generate_waypoints(self, target_area: List[Position3D], mission_type: str, template: Dict) -> List[Waypoint]:
+        """Генерація waypoints для місії"""
+        waypoints = []
+        
+        if not target_area:
+            return waypoints
+        
+        # Визначення меж області
+        min_x = min(p.x for p in target_area)
+        max_x = max(p.x for p in target_area)
+        min_y = min(p.y for p in target_area)
+        max_y = max(p.y for p in target_area)
+        altitude = template.get('default_altitude', 30.0)
+        
+        if mission_type == 'reconnaissance':
+            # Створення сітки для розвідки
+            step = 20.0  # крок сітки
+            for x in np.arange(min_x, max_x + step, step):
+                for y in np.arange(min_y, max_y + step, step):
+                    waypoints.append(Waypoint(
+                        position=Position3D(x, y, altitude),
+                        speed=template.get('default_speed', 5.0),
+                        action="scan",
+                        parameters={'scan_duration': 5}
+                    ))
+        
+        elif mission_type == 'patrol':
+            # Створення маршруту патрулювання по периметру
+            perimeter_points = [
+                Position3D(min_x, min_y, altitude),
+                Position3D(max_x, min_y, altitude),
+                Position3D(max_x, max_y, altitude),
+                Position3D(min_x, max_y, altitude),
+                Position3D(min_x, min_y, altitude)  # повернення до початку
+            ]
+            
+            for point in perimeter_points:
+                waypoints.append(Waypoint(
+                    position=point,
+                    speed=template.get('default_speed', 3.0),
+                    action="patrol",
+                    parameters={'patrol_radius': 10}
+                ))
+        
+        return waypoints
+    
+    def _identify_threat_zones(self, target_area: List[Position3D]) -> List[ThreatZone]:
+        """Ідентифікація зон загроз (симуляція OSINT даних)"""
+        threat_zones = []
+        
+        # Симуляція виявлення загроз
+        if target_area:
+            center = target_area[0]
+            
+            # Приклад: випадкове розміщення загроз
+            for i in range(np.random.randint(0, 3)):
+                threat_pos = Position3D(
+                    center.x + np.random.uniform(-50, 50),
+                    center.y + np.random.uniform(-50, 50),
+                    0
+                )
+                
+                threat_zones.append(ThreatZone(
+                    center=threat_pos,
+                    radius=np.random.uniform(10, 30),
+                    threat_level=np.random.uniform(0.3, 0.9),
+                    threat_type=np.random.choice(['air_defense', 'radar', 'jamming'])
+                ))
+        
+        return threat_zones
+    
+    def _get_weather_forecast(self, position: Position3D) -> Dict[str, Any]:
+        """Отримання прогнозу погоди (симуляція)"""
+        return {
+            'wind_speed': np.random.uniform(0, 15),  # м/с
+            'wind_direction': np.random.uniform(0, 360),  # градуси
+            'visibility': np.random.uniform(1000, 10000),  # метри
+            'temperature': np.random.uniform(-20, 40),  # °C
+            'precipitation': np.random.choice([0, 0, 0, 1])  # 0 - немає, 1 - є
+        }
+    
+    def _classify_environment(self, target_area: List[Position3D]) -> EnvironmentType:
+        """Класифікація типу середовища (симуляція)"""
+        # Спрощена логіка класифікації
+        return np.random.choice(list(EnvironmentType))
+    
+    def _estimate_duration(self, waypoints: List[Waypoint], default_speed: float) -> int:
+        """Оцінка тривалості місії"""
+        if not waypoints:
+            return 300  # 5 хвилин за замовчуванням
+        
+        total_distance = 0
+        for i in range(1, len(waypoints)):
+            distance = waypoints[i-1].position.distance_to(waypoints[i].position)
+            total_distance += distance
+        
+        flight_time = total_distance / default_speed
+        action_time = len(waypoints) * 10  # 10 секунд на waypoint
+        
+        return int(flight_time + action_time)
+    
+    def _define_success_criteria(self, mission_type: str) -> Dict[str, Any]:
+        """Визначення критеріїв успіху місії"""
+        criteria = {
+            'reconnaissance': {
+                'area_coverage': 0.9,  # 90% покриття області
+                'image_quality': 0.8,  # якість зображень
+                'data_transmission': 0.95  # успішна передача даних
+            },
+            'patrol': {
+                'route_completion': 0.95,  # завершення маршруту
+                'threat_detection': 0.8,  # виявлення загроз
+                'formation_integrity': 0.9  # збереження формації
+            },
+            'search_and_rescue': {
+                'search_coverage': 0.95,  # покриття пошукової області
+                'target_detection': 0.7,  # виявлення цілей
+                'response_time': 600  # максимальний час відгуку в секундах
+            }
+        }
+        
+        return criteria.get(mission_type, {'completion': 0.8})
+    
+    def _genetic_optimization(self, mission: MissionParameters, historical_data: List[Dict]) -> Dict[str, Any]:
+        """Генетичний алгоритм оптимізації"""
+        # Спрощена реалізація генетичного алгоритму
+        population_size = 20
+        generations = 10
+        
+        # Ініціалізація популяції
+        population = []
+        for _ in range(population_size):
+            individual = {
+                'formation_spacing': np.random.uniform(5, 20),
+                'altitude_variation': np.random.uniform(0, 10),
+                'speed_factor': np.random.uniform(0.5, 1.5),
+                'communication_interval': np.random.uniform(1, 10)
+            }
+            population.append(individual)
+        
+        # Еволюція
+        for generation in range(generations):
+            # Оцінка фітнесу
+            fitness_scores = [self._evaluate_fitness(ind, mission, historical_data) for ind in population]
+            
+            # Селекція та схрещування
+            new_population = []
+            for _ in range(population_size):
+                parent1 = self._tournament_selection(population, fitness_scores)
+                parent2 = self._tournament_selection(population, fitness_scores)
+                child = self._crossover(parent1, parent2)
+                child = self._mutate(child)
+                new_population.append(child)
+            
+            population = new_population
+        
+        # Повернення найкращого індивіда
+        final_fitness = [self._evaluate_fitness(ind, mission, historical_data) for ind in population]
+        best_individual = population[np.argmax(final_fitness)]
+        
+        return best_individual
+    
+    def _pso_optimization(self, mission: MissionParameters, historical_data: List[Dict]) -> Dict[str, Any]:
+        """Particle Swarm Optimization"""
+        # Спрощена реалізація PSO
+        swarm_size = 15
+        dimensions = 4  # formation_spacing, altitude_variation, speed_factor, communication_interval
+        max_iterations = 20
+        
+        # Ініціалізація рою
+        particles = []
+        velocities = []
+        personal_best = []
+        personal_best_fitness = []
+        
+        for _ in range(swarm_size):
+            particle = np.random.uniform([5, 0, 0.5, 1], [20, 10, 1.5, 10])
+            velocity = np.random.uniform(-1, 1, dimensions)
+            
+            particles.append(particle)
+            velocities.append(velocity)
+            personal_best.append(particle.copy())
+            personal_best_fitness.append(float('-inf'))
+        
+        global_best = None
+        global_best_fitness = float('-inf')
+        
+        # Оптимізація
+        for iteration in range(max_iterations):
+            for i in range(swarm_size):
+                # Перетворення particle в словник для оцінки
+                particle_dict = {
+                    'formation_spacing': particles[i][0],
+                    'altitude_variation': particles[i][1],
+                    'speed_factor': particles[i][2],
+                    'communication_interval': particles[i][3]
+                }
+                
+                fitness = self._evaluate_fitness(particle_dict, mission, historical_data)
+                
+                # Оновлення персонального найкращого
+                if fitness > personal_best_fitness[i]:
+                    personal_best_fitness[i] = fitness
+                    personal_best[i] = particles[i].copy()
+                
+                # Оновлення глобального найкращого
+                if fitness > global_best_fitness:
+                    global_best_fitness = fitness
+                    global_best = particles[i].copy()
+            
+            # Оновлення швидкостей та позицій
+            for i in range(swarm_size):
+                # PSO формула оновлення швидкості
+                w = 0.5  # інерція
+                c1 = 1.5  # когнітивний коефіцієнт
+                c2 = 1.5  # соціальний коефіцієнт
+                
+                r1 = np.random.random(dimensions)
+                r2 = np.random.random(dimensions)
+                
+                velocities[i] = (w * velocities[i] + 
+                               c1 * r1 * (personal_best[i] - particles[i]) +
+                               c2 * r2 * (global_best - particles[i]))
+                
+                particles[i] += velocities[i]
+                
+                # Обмеження меж
+                particles[i] = np.clip(particles[i], [5, 0, 0.5, 1], [20, 10, 1.5, 10])
+        
+        return {
+            'formation_spacing': global_best[0],
+            'altitude_variation': global_best[1],
+            'speed_factor': global_best[2],
+            'communication_interval': global_best[3]
+        }
+    
+    def _sa_optimization(self, mission: MissionParameters, historical_data: List[Dict]) -> Dict[str, Any]:
+        """Simulated Annealing optimization"""
+        # Початкове рішення
+        current_solution = {
+            'formation_spacing': np.random.uniform(5, 20),
+            'altitude_variation': np.random.uniform(0, 10),
+            'speed_factor': np.random.uniform(0.5, 1.5),
+            'communication_interval': np.random.uniform(1, 10)
+        }
+        
+        current_fitness = self._evaluate_fitness(current_solution, mission, historical_data)
+        best_solution = current_solution.copy()
+        best_fitness = current_fitness
+        
+        # Параметри SA
+        initial_temp = 100.0
+        final_temp = 0.01
+        cooling_rate = 0.95
+        max_iterations = 100
+        
+        temperature = initial_temp
+        
+        for iteration in range(max_iterations):
+            # Генерація нового рішення
+            new_solution = current_solution.copy()
+            param = np.random.choice(list(new_solution.keys()))
+            
+            if param == 'formation_spacing':
+                new_solution[param] = np.clip(
+                    current_solution[param] + np.random.normal(0, 2),
+                    5, 20
+                )
+            elif param == 'altitude_variation':
+                new_solution[param] = np.clip(
+                    current_solution[param] + np.random.normal(0, 1),
+                    0, 10
+                )
+            elif param == 'speed_factor':
+                new_solution[param] = np.clip(
+                    current_solution[param] + np.random.normal(0, 0.1),
+                    0.5, 1.5
+                )
+            else:  # communication_interval
+                new_solution[param] = np.clip(
+                    current_solution[param] + np.random.normal(0, 0.5),
+                    1, 10
+                )
+            
+            new_fitness = self._evaluate_fitness(new_solution, mission, historical_data)
+            
+            # Критерій прийняття
+            if new_fitness > current_fitness:
+                current_solution = new_solution
+                current_fitness = new_fitness
+                
+                if new_fitness > best_fitness:
+                    best_solution = new_solution.copy()
+                    best_fitness = new_fitness
+            else:
+                # Ймовірність прийняття гіршого рішення
+                probability = np.exp((new_fitness - current_fitness) / temperature)
+                if np.random.random() < probability:
+                    current_solution = new_solution
+                    current_fitness = new_fitness
+            
+            # Охолодження
+            temperature *= cooling_rate
+            if temperature < final_temp:
+                break
+        
+        return best_solution
+    
+    def _evaluate_fitness(self, parameters: Dict[str, Any], mission: MissionParameters, historical_data: List[Dict]) -> float:
+        """Оцінка фітнесу параметрів"""
+        fitness = 0.0
+        
+        # Базова оцінка на основі типу місії
+        if mission.mission_type == 'reconnaissance':
+            # Для розвідки важливі дистанція формації та швидкість
+            formation_score = 1.0 / (1.0 + abs(parameters['formation_spacing'] - 10))
+            speed_score = parameters['speed_factor']
+            fitness += formation_score * 0.4 + speed_score * 0.6
+        
+        elif mission.mission_type == 'patrol':
+            # Для патрулювання важливі стабільність та комунікація
+            communication_score = 1.0 / (1.0 + parameters['communication_interval'])
+            altitude_score = 1.0 / (1.0 + parameters['altitude_variation'])
+            fitness += communication_score * 0.5 + altitude_score * 0.5
+        
+        # Врахування історичних даних
+        if historical_data:
+            historical_average = np.mean([data['success_rate'] for data in historical_data])
+            fitness *= (1.0 + historical_average)
+        
+        return fitness
+    
+    def _tournament_selection(self, population: List[Dict], fitness_scores: List[float], tournament_size: int = 3) -> Dict:
+        """Турнірна селекція для генетичного алгоритму"""
+        tournament_indices = np.random.choice(len(population), tournament_size, replace=False)
+        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitness)]
+        return population[winner_index]
+    
+    def _crossover(self, parent1: Dict, parent2: Dict) -> Dict:
+        """Схрещування для генетичного алгоритму"""
+        child = {}
+        for key in parent1.keys():
+            if np.random.random() < 0.5:
+                child[key] = parent1[key]
+            else:
+                child[key] = parent2[key]
+        return child
+    
+    def _mutate(self, individual: Dict, mutation_rate: float = 0.1) -> Dict:
+        """Мутація для генетичного алгоритму"""
+        mutated = individual.copy()
+        for key, value in mutated.items():
+            if np.random.random() < mutation_rate:
+                if key == 'formation_spacing':
+                    mutated[key] = np.clip(value + np.random.normal(0, 2), 5, 20)
+                elif key == 'altitude_variation':
+                    mutated[key] = np.clip(value + np.random.normal(0, 1), 0, 10)
+                elif key == 'speed_factor':
+                    mutated[key] = np.clip(value + np.random.normal(0, 0.1), 0.5, 1.5)
+                else:  # communication_interval
+                    mutated[key] = np.clip(value + np.random.normal(0, 0.5), 1, 10)
+        return mutated
+    
+    def _apply_optimizations(self, mission: MissionParameters, optimizations: Dict[str, Any]) -> MissionParameters:
+        """Застосування оптимізацій до місії"""
+        # Створення копії місії з оновленими параметрами
+        optimized_mission = MissionParameters(
+            mission_id=mission.mission_id,
+            mission_type=mission.mission_type,
+            priority=mission.priority,
+            start_time=mission.start_time,
+            estimated_duration=int(mission.estimated_duration * optimizations.get('speed_factor', 1.0)),
+            target_area=mission.target_area,
+            waypoints=mission.waypoints,
+            drone_count=mission.drone_count,
+            formation_type=mission.formation_type,
+            environment=mission.environment,
+            weather_conditions=mission.weather_conditions,
+            threat_zones=mission.threat_zones,
+            success_criteria=mission.success_criteria
+        )
+        
+        return optimized_mission
+
+# ==================== МОДУЛЬ СИМУЛЯЦІЇ ====================
+
+class SimulationEngine:
+    """Модуль симуляції та цифрового двійника"""
+    
+    def __init__(self, knowledge_base: KnowledgeBase):
+        self.knowledge_base = knowledge_base
+        self.active_simulations = {}
+        self.simulation_results = {}
+        
+    def create_simulation(self, mission: MissionParameters, simulation_params: Dict[str, Any] = None) -> str:
+        """Створення нової симуляції"""
+        sim_id = f"sim_{uuid.uuid4().hex[:8]}"
+        
+        default_params = {
+            'time_acceleration': 10.0,  # прискорення часу
+            'weather_simulation': True,
+            'threat_simulation': True,
+            'equipment_failures': True,
+            'communication_issues': True,
+            'random_seed': int(time.time())
+        }
+        
+        if simulation_params:
+            default_params.update(simulation_params)
+        
+        simulation = {
+            'id': sim_id,
+            'mission': mission,
+            'parameters': default_params,
+            'status': 'created',
+            'start_time': None,
+            'end_time': None,
+            'results': None
+        }
+        
+        self.active_simulations[sim_id] = simulation
+        logger.info(f"Створено симуляцію {sim_id} для місії {mission.mission_id}")
+        
+        return sim_id
+    
+    async def run_simulation(self, simulation_id: str) -> Dict[str, Any]:
+        """Запуск симуляції"""
+        if simulation_id not in self.active_simulations:
+            raise ValueError(f"Симуляція {simulation_id} не знайдена")
+        
+        simulation = self.active_simulations[simulation_id]
+        simulation['status'] = 'running'
+        simulation['start_time'] = datetime.now()
+        
+        logger.info(f"Запуск симуляції {simulation_id}")
+        
+        try:
+            # Ініціалізація середовища симуляції
+            environment = self._create_simulation_environment(simulation['mission'])
+            
+            # Ініціалізація віртуальних дронів
+            virtual_drones = self._create_virtual_drones(simulation['mission'])
+            
+            # Симуляція місії
+            results = await self._simulate_mission(
+                environment, 
+                virtual_drones, 
+                simulation['mission'], 
+                simulation['parameters']
+            )
+            
+            simulation['status'] = 'completed'
+            simulation['end_time'] = datetime.now()
+            simulation['results'] = results
+            
+            # Збереження результатів
+            self.simulation_results[simulation_id] = results
+            
+            logger.info(f"Симуляція {simulation_id} завершена успішно")
+            return results
+            
+        except Exception as e:
+            simulation['status'] = 'failed'
+            simulation['end_time'] = datetime.now()
+            logger.error(f"Помилка в симуляції {simulation_id}: {str(e)}")
+            raise
+    
+    def _create_simulation_environment(self, mission: MissionParameters) -> Dict[str, Any]:
+        """Створення віртуального середовища симуляції"""
+        np.random.seed(int(time.time()))
+        
+        environment = {
+            'terrain': self._generate_terrain(mission.target_area),
+            'weather': mission.weather_conditions,
+            'threats': mission.threat_zones,
+            'obstacles': self._generate_obstacles(mission.target_area),
+            'electromagnetic_environment': self._simulate_em_environment(mission.target_area)
+        }
+        
+        return environment
+    
+    def _generate_terrain(self, target_area: List[Position3D]) -> Dict[str, Any]:
+        """Генерація віртуального рельєфу"""
+        if not target_area:
+            return {'type': 'flat', 'elevation_map': {}}
+        
+        # Спрощена генерація рельєфу
+        min_x = min(p.x for p in target_area)
+        max_x = max(p.x for p in target_area)
+        min_y = min(p.y for p in target_area)
+        max_y = max(p.y for p in target_area)
+        
+        # Створення сітки висот
+        resolution = 10  # метрів на піксель
+        width = int((max_x - min_x) / resolution) + 1
+        height = int((max_y - min_y) / resolution) + 1
+        
+        elevation_map = np.random.uniform(0, 100, (height, width))
+        
+        return {
+            'type': 'varied',
+            'bounds': {'min_x': min_x, 'max_x': max_x, 'min_y': min_y, 'max_y': max_y},
+            'resolution': resolution,
+            'elevation_map': elevation_map.tolist()
+        }
+    
+    def _generate_obstacles(self, target_area: List[Position3D]) -> List[Dict[str, Any]]:
+        """Генерація статичних перешкод"""
+        obstacles = []
+        
+        if target_area:
+            center = target_area[0]
+            
+            # Генерація випадкових перешкод
+            for _ in range(np.random.randint(5, 15)):
+                obstacle = {
+                    'type': np.random.choice(['building', 'tower', 'tree', 'pole']),
+                    'position': {
+                        'x': center.x + np.random.uniform(-100, 100),
+                        'y': center.y + np.random.uniform(-100, 100),
+                        'z': 0
+                    },
+                    'dimensions': {
+                        'width': np.random.uniform(5, 20),
+                        'length': np.random.uniform(5, 20),
+                        'height': np.random.uniform(10, 100)
+                    }
+                }
+                obstacles.append(obstacle)
+        
+        return obstacles
+    
+    def _simulate_em_environment(self, target_area: List[Position3D]) -> Dict[str, Any]:
+        """Симуляція електромагнітного середовища"""
+        return {
+            'gps_availability': np.random.uniform(0.7, 1.0),
+            'communication_noise': np.random.uniform(0.0, 0.3),
+            'jamming_zones': [
+                {
+                    'center': {
+                        'x': target_area[0].x + np.random.uniform(-50, 50),
+                        'y': target_area[0].y + np.random.uniform(-50, 50)
+                    },
+                    'radius': np.random.uniform(10, 30),
+                    'intensity': np.random.uniform(0.2, 0.8)
+                } for _ in range(np.random.randint(0, 3))
+            ] if target_area else []
+        }
+    
+    def _create_virtual_drones(self, mission: MissionParameters) -> List[Dict[str, Any]]:
+        """Створення віртуальних дронів для симуляції"""
+        virtual_drones = []
+        
+        for i in range(mission.drone_count):
+            drone = {
+                'id': f"sim_drone_{i+1}",
+                'position': Position3D(
+                    np.random.uniform(-10, 10),
+                    np.random.uniform(-10, 10),
+                    30.0
+                ),
+                'battery_level': 100.0,
+                'state': 'idle',
+                'sensors': {
+                    'camera': {'status': 'active', 'quality': 0.9},
+                    'lidar': {'status': 'active', 'range': 100},
+                    'gps': {'status': 'active', 'accuracy': 2.0}
+                },
+                'failures': [],
+                'communication_status': 'online',
+                'mission_progress': 0.0
+            }
+            virtual_drones.append(drone)
+        
+        return virtual_drones
+    
+    async def _simulate_mission(self, 
+                               environment: Dict[str, Any], 
+                               virtual_drones: List[Dict[str, Any]], 
+                               mission: MissionParameters,
+                               simulation_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Основна логіка симуляції місії"""
+        
+        mission_time = 0.0
+        time_step = 1.0  # секунда
+        max_time = mission.estimated_duration * 2  # максимальний час симуляції
+        
+        results = {
+            'mission_success': False,
+            'completion_percentage': 0.0,
+            'drone_losses': 0,
+            'timeline': [],
+            'performance_metrics': {},
+            'lessons_learned': []
+        }
+        
+        completed_waypoints = 0
+        total_waypoints = len(mission.waypoints)
+        
+        while mission_time < max_time:
+            # Оновлення стану кожного дрона
+            for drone in virtual_drones:
+                if drone['state'] != 'destroyed':
+                    # Симуляція руху дрона
+                    self._update_drone_position(drone, mission, mission_time)
+                    
+                    # Симуляція споживання батареї
+                    self._update_battery(drone, time_step)
+                    
+                    # Симуляція відмов обладнання
+                    if simulation_params.get('equipment_failures', True):
+                        self._simulate_equipment_failures(drone)
+                    
+                    # Симуляція комунікаційних проблем
+                    if simulation_params.get('communication_issues', True):
+                        self._simulate_communication_issues(drone, environment)
+                    
+                    # Перевірка загроз
+                    if simulation_params.get('threat_simulation', True):
+                        self._check_threat_engagement(drone, mission.threat_zones)
+            
+            # Перевірка прогресу місії
+            mission_progress = self._calculate_mission_progress(virtual_drones, mission)
+            
+            # Логування стану
+            timeline_entry = {
+                'time': mission_time,
+                'active_drones': len([d for d in virtual_drones if d['state'] != 'destroyed']),
+                'mission_progress': mission_progress,
+                'average_battery': np.mean([d['battery_level'] for d in virtual_drones if d['state'] != 'destroyed'])
+            }
+            results['timeline'].append(timeline_entry)
+            
+            # Перевірка умов завершення
+            if mission_progress >= 0.9:  # 90% завершення
+                results['mission_success'] = True
+                break
+            
+            active_drones = len([d for d in virtual_drones if d['state'] != 'destroyed'])
+            if active_drones == 0:
+                break  # Всі дрони знищені
+            
+            mission_time += time_step
+            await asyncio.sleep(0.001)  # Невелика затримка для асинхронності
+        
+        # Фінальні розрахунки
+        results['completion_percentage'] = mission_progress
+        results['drone_losses'] = len([d for d in virtual_drones if d['state'] == 'destroyed'])
+        results['mission_duration'] = mission_time
+        
+        # Розрахунок метрик продуктивності
+        results['performance_metrics'] = self._calculate_performance_metrics(
+            virtual_drones, mission, results['timeline']
+        )
+        
+        # Генерація висновків
+        results['lessons_learned'] = self._generate_lessons_learned(results, mission)
+        
+        return results
+    
+    def _update_drone_position(self, drone: Dict[str, Any], mission: MissionParameters, current_time: float):
+        """Оновлення позиції дрона під час симуляції"""
+        if not mission.waypoints or drone['state'] == 'destroyed':
+            return
+        
+        # Спрощена логіка руху до waypoints
+        current_waypoint_index = int(drone['mission_progress'] * len(mission.waypoints))
+        if current_waypoint_index >= len(mission.waypoints):
+            drone['state'] = 'mission_complete'
+            return
+        
+        target_waypoint = mission.waypoints[current_waypoint_index]
+        current_pos = drone['position']
+        target_pos = target_waypoint.position
+        
+        # Рух до цілі
+        distance = current_pos.distance_to(target_pos)
+        if distance < 2.0:  # Досягли waypoint
+            drone['mission_progress'] += 1.0 / len(mission.waypoints)
+            if drone['mission_progress'] >= 1.0:
+                drone['state'] = 'mission_complete'
+        else:
+            # Рух в напрямку цілі
+            direction = np.array([
+                target_pos.x - current_pos.x,
+                target_pos.y - current_pos.y,
+                target_pos.z - current_pos.z
+            ])
+            direction = direction / np.linalg.norm(direction)
+            
+            speed = target_waypoint.speed
+            new_pos = Position3D(
+                current_pos.x + direction[0] * speed,
+                current_pos.y + direction[1] * speed,
+                current_pos.z + direction[2] * speed
+            )
+            drone['position'] = new_pos
+    
+    def _update_battery(self, drone: Dict[str, Any], time_step: float):
+        """Оновлення рівня батареї"""
+        if drone['state'] == 'destroyed':
+            return
+        
+        # Споживання енергії залежно від стану
+        consumption_rate = {
+            'idle': 0.1,
+            'moving': 0.3,
+            'scanning': 0.5,
+            'mission_complete': 0.05
+        }
+        
+        rate = consumption_rate.get(drone['state'], 0.2)
+        drone['battery_level'] -= rate * time_step / 60.0  # % за хвилину
+        
+        if drone['battery_level'] <= 0:
+            drone['state'] = 'destroyed'
+            drone['battery_level'] = 0
+    
+    def _simulate_equipment_failures(self, drone: Dict[str, Any]):
+        """Симуляція відмов обладнання"""
+        failure_probability = 0.0001  # 0.01% на кожен тик
+        
+        for sensor_name, sensor_data in drone['sensors'].items():
+            if sensor_data['status'] == 'active' and np.random.random() < failure_probability:
+                sensor_data['status'] = 'failed'
+                drone['failures'].append(f"{sensor_name}_failure")
+                logger.warning(f"Дрон {drone['id']}: відмова сенсору {sensor_name}")
+    
+    def _simulate_communication_issues(self, drone: Dict[str, Any], environment: Dict[str, Any]):
+        """Симуляція проблем зв'язку"""
+        base_reliability = 0.99
+        
+        # Перевірка зон глушіння
+        for jamming_zone in environment['electromagnetic_environment']['jamming_zones']:
+            drone_pos = drone['position']
+            zone_center = Position3D(
+                jamming_zone['center']['x'],
+                jamming_zone['center']['y'],
+                0
+            )
+            
+            distance = drone_pos.distance_to(zone_center)
+            if distance < jamming_zone['radius']:
+                reliability = base_reliability * (1 - jamming_zone['intensity'])
+                if np.random.random() > reliability:
+                    drone['communication_status'] = 'disrupted'
+                    return
+        
+        drone['communication_status'] = 'online'
+    
+    def _check_threat_engagement(self, drone: Dict[str, Any], threat_zones: List[ThreatZone]):
+        """Перевірка зіткнення з загрозами"""
+        drone_pos = drone['position']
+        
+        for threat in threat_zones:
+            distance = drone_pos.distance_to(threat.center)
+            if distance < threat.radius:
+                # Ймовірність знищення залежить від рівня загрози
+                destruction_probability = threat.threat_level * 0.1  # 10% максимум
+                
+                if np.random.random() < destruction_probability:
+                    drone['state'] = 'destroyed'
+                    logger.warning(f"Дрон {drone['id']} знищено загрозою {threat.threat_type}")
+                    break
+    
+    def _calculate_mission_progress(self, virtual_drones: List[Dict[str, Any]], mission: MissionParameters) -> float:
+        """Розрахунок прогресу місії"""
+        if not virtual_drones:
+            return 0.0
+        
+        active_drones = [d for d in virtual_drones if d['state'] != 'destroyed']
+        if not active_drones:
+            return 0.0
+        
+        total_progress = sum(drone['mission_progress'] for drone in active_drones)
+        return total_progress / len(virtual_drones)  # Середній прогрес всіх дронів
+    
+    def _calculate_performance_metrics(self, 
+                                     virtual_drones: List[Dict[str, Any]], 
+                                     mission: MissionParameters, 
+                                     timeline: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Розрахунок метрик продуктивності"""
+        
+        metrics = {
+            'survival_rate': len([d for d in virtual_drones if d['state'] != 'destroyed']) / len(virtual_drones),
+            'average_mission_completion': np.mean([d['mission_progress'] for d in virtual_drones]),
+            'total_equipment_failures': sum(len(d['failures']) for d in virtual_drones),
+            'communication_uptime': np.mean([
+                1.0 if entry['active_drones'] > 0 else 0.0 
+                for entry in timeline
+            ]),
+            'energy_efficiency': np.mean([
+                d['battery_level'] for d in virtual_drones if d['state'] != 'destroyed'
+            ]) if any(d['state'] != 'destroyed' for d in virtual_drones) else 0.0
+        }
+        
+        return metrics
+    
+    def _generate_lessons_learned(self, results: Dict[str, Any], mission: MissionParameters) -> List[str]:
+        """Генерація висновків з симуляції"""
+        lessons = []
+        
+        # Аналіз втрат дронів
+        if results['drone_losses'] > mission.drone_count * 0.3:
+            lessons.append("Високий рівень втрат дронів. Розгляньте зміну маршруту або додаткові контрзаходи.")
+        
+        # Аналіз завершення місії
+        if results['completion_percentage'] < 0.5:
+            lessons.append("Низький рівень завершення місії. Потрібна оптимізація планування або збільшення ресурсів.")
+        
+        # Аналіз обладнання
+        total_failures = results['performance_metrics']['total_equipment_failures']
+        if total_failures > mission.drone_count:
+            lessons.append("Високий рівень відмов обладнання. Рекомендується технічне обслуговування.")
+        
+        # Аналіз енергоефективності
+        energy_efficiency = results['performance_metrics']['energy_efficiency']
+        if energy_efficiency < 20:
+            lessons.append("Низька енергоефективність. Оптимізуйте траєкторії та швидкість.")
+        
+        return lessons
+    
+    def get_simulation_results(self, simulation_id: str) -> Optional[Dict[str, Any]]:
+        """Отримання результатів симуляції"""
+        return self.simulation_results.get(simulation_id)
+    
+    def list_simulations(self) -> List[Dict[str, Any]]:
+        """Список всіх симуляцій"""
+        return [
+            {
+                'id': sim_id,
+                'mission_id': sim_data['mission'].mission_id,
+                'status': sim_data['status'],
+                'start_time': sim_data['start_time'],
+                'end_time': sim_data['end_time']
+            }
+            for sim_id, sim_data in self.active_simulations.items()
+        ]
+
+# ==================== МОДУЛЬ АНАЛІЗУ ТА ВІЗУАЛІЗАЦІЇ ====================
+
+class TelemetryAnalyzer:
+    """Модуль аналізу та візуалізації телеметрії"""
+    
+    def __init__(self, knowledge_base: KnowledgeBase):
+        self.knowledge_base = knowledge_base
+        self.analysis_cache = {}
+        
+    def analyze_mission_telemetry(self, mission_id: str) -> Dict[str, Any]:
+        """Аналіз телеметрії місії"""
+        # Отримання даних з бази
+        cursor = self.knowledge_base.connection.cursor()
+        cursor.execute('''
+            SELECT drone_id, timestamp, position_x, position_y, position_z, 
+                   battery_level, state, sensor_data
+            FROM telemetry 
+            WHERE mission_id = ?
+            ORDER BY timestamp
+        ''', (mission_id,))
+        
+        telemetry_data = cursor.fetchall()
+        
+        if not telemetry_data:
+            return {'error': 'Телеметричні дані для місії не знайдені'}
+        
+        # Аналіз даних
+        analysis = {
+            'mission_id': mission_id,
+            'total_data_points': len(telemetry_data),
+            'drones_involved': len(set(row[0] for row in telemetry_data)),
+            'duration_analysis': self._analyze_mission_duration(telemetry_data),
+            'trajectory_analysis': self._analyze_trajectories(telemetry_data),
+            'battery_analysis': self._analyze_battery_consumption(telemetry_data),
+            'performance_metrics': self._calculate_mission_performance(telemetry_data),
+            'anomalies': self._detect_anomalies(telemetry_data)
+        }
+        
+        self.analysis_cache[mission_id] = analysis
+        return analysis
+    
+    def _analyze_mission_duration(self, telemetry_data: List[Tuple]) -> Dict[str, Any]:
+        """Аналіз тривалості місії"""
+        timestamps = [datetime.fromisoformat(row[1]) for row in telemetry_data]
+        start_time = min(timestamps)
+        end_time = max(timestamps)
+        duration = (end_time - start_time).total_seconds()
+        
+        return {
+            'start_time': start_time.isoformat(),
+            'end_time': end_time.isoformat(),
+            'total_duration_seconds': duration,
+            'total_duration_minutes': duration / 60.0
+        }
+    
+    def _analyze_trajectories(self, telemetry_data: List[Tuple]) -> Dict[str, Any]:
+        """Аналіз траєкторій дронів"""
+        drone_trajectories = {}
+        
+        for row in telemetry_data:
+            drone_id = row[0]
+            position = (row[2], row[3], row[4])  # x, y, z
+            
+            if drone_id not in drone_trajectories:
+                drone_trajectories[drone_id] = []
+            drone_trajectories[drone_id].append(position)
+        
+        analysis = {}
+        for drone_id, trajectory in drone_trajectories.items():
+            if len(trajectory) > 1:
+                # Розрахунок загальної відстані
+                total_distance = 0
+                for i in range(1, len(trajectory)):
+                    prev_pos = np.array(trajectory[i-1])
+                    curr_pos = np.array(trajectory[i])
+                    total_distance += np.linalg.norm(curr_pos - prev_pos)
+                
+                # Розрахунок середньої швидкості
+                avg_speed = total_distance / len(trajectory) if len(trajectory) > 0 else 0
+                
+                analysis[drone_id] = {
+                    'total_distance': total_distance,
+                    'waypoints_count': len(trajectory),
+                    'average_speed': avg_speed,
+                    'max_altitude': max(pos[2] for pos in trajectory),
+                    'min_altitude': min(pos[2] for pos in trajectory)
+                }
+        
+        return analysis
+    
+    def _analyze_battery_consumption(self, telemetry_data: List[Tuple]) -> Dict[str, Any]:
+        """Аналіз споживання батареї"""
+        drone_battery_data = {}
+        
+        for row in telemetry_data:
+            drone_id = row[0]
+            battery_level = row[5]
+            
+            if drone_id not in drone_battery_data:
+                drone_battery_data[drone_id] = []
+            drone_battery_data[drone_id].append(battery_level)
+        
+        analysis = {}
+        for drone_id, battery_history in drone_battery_data.items():
+            if battery_history:
+                initial_battery = battery_history[0]
+                final_battery = battery_history[-1]
+                consumption_rate = (initial_battery - final_battery) / len(battery_history)
+                
+                analysis[drone_id] = {
+                    'initial_battery': initial_battery,
+                    'final_battery': final_battery,
+                    'total_consumption': initial_battery - final_battery,
+                    'consumption_rate_per_datapoint': consumption_rate,
+                    'critical_battery_events': len([b for b in battery_history if b < 20])
+                }
+        
+        return analysis
+    
+    def _calculate_mission_performance(self, telemetry_data: List[Tuple]) -> Dict[str, Any]:
+        """Розрахунок метрик продуктивності місії"""
+        drone_states = {}
+        
+        for row in telemetry_data:
+            drone_id = row[0]
+            state = row[6]
+            
+            if drone_id not in drone_states:
+                drone_states[drone_id] = []
+            drone_states[drone_id].append(state)
+        
+        performance = {
+            'completion_rate': 0.0,
+            'active_time_percentage': 0.0,
+            'error_rate': 0.0,
+            'mission_success': False
+        }
+        
+        total_states = 0
+        completed_states = 0
+        active_states = 0
+        error_states = 0
+        
+        for drone_id, states in drone_states.items():
+            total_states += len(states)
+            completed_states += len([s for s in states if s in ['mission_complete', 'returning']])
+            active_states += len([s for s in states if s in ['moving', 'scanning', 'attacking']])
+            error_states += len([s for s in states if s in ['emergency', 'failed']])
+        
+        if total_states > 0:
+            performance['completion_rate'] = completed_states / total_states
+            performance['active_time_percentage'] = active_states / total_states
+            performance['error_rate'] = error_states / total_states
+            performance['mission_success'] = performance['completion_rate'] > 0.8
+        
+        return performance
+    
+    def _detect_anomalies(self, telemetry_data: List[Tuple]) -> List[Dict[str, Any]]:
+        """Виявлення аномалій в телеметричних даних"""
+        anomalies = []
+        
+        # Аномалія: різкі стрибки в позиції
+        drone_positions = {}
+        for row in telemetry_data:
+            drone_id = row[0]
+            position = np.array([row[2], row[3], row[4]])
+            
+            if drone_id not in drone_positions:
+                drone_positions[drone_id] = []
+            drone_positions[drone_id].append(position)
+        
+        for drone_id, positions in drone_positions.items():
+            for i in range(1, len(positions)):
+                distance = np.linalg.norm(positions[i] - positions[i-1])
+                if distance > 50:  # Різкий стрибок більше 50 метрів
+                    anomalies.append({
+                        'type': 'position_jump',
+                        'drone_id': drone_id,
+                        'datapoint_index': i,
+                        'distance': distance,
+                        'severity': 'high' if distance > 100 else 'medium'
+                    })
+        
+        # Аномалія: різке падіння батареї
+        drone_battery = {}
+        for row in telemetry_data:
+            drone_id = row[0]
+            battery = row[5]
+            
+            if drone_id not in drone_battery:
+                drone_battery[drone_id] = []
+            drone_battery[drone_id].append(battery)
+        
+        for drone_id, battery_levels in drone_battery.items():
+            for i in range(1, len(battery_levels)):
+                battery_drop = battery_levels[i-1] - battery_levels[i]
+                if battery_drop > 10:  # Падіння більше 10% за один крок
+                    anomalies.append({
+                        'type': 'battery_drop',
+                        'drone_id': drone_id,
+                        'datapoint_index': i,
+                        'drop_amount': battery_drop,
