@@ -1,0 +1,1322 @@
+#!/usr/bin/env python3
+"""
+Розширені модулі для наземного центру управління роєм дронів
+Включає: LLM-сервіси, аналіз зображень, погодний модуль, радіоелектронну боротьбу
+"""
+
+import asyncio
+import json
+import time
+import numpy as np
+import cv2
+import requests
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any, Union
+from datetime import datetime, timedelta
+import logging
+import sqlite3
+from enum import Enum
+import base64
+import io
+from PIL import Image
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor
+import xml.etree.ElementTree as ET
+
+logger = logging.getLogger(__name__)
+
+# ==================== LLM КОГНІТИВНІ СЕРВІСИ ====================
+
+class LLMCognitiveServices:
+    """Великі мовні моделі для високорівневого аналізу та планування"""
+    
+    def __init__(self, api_endpoint: str = None, model_name: str = "gpt-4"):
+        self.api_endpoint = api_endpoint
+        self.model_name = model_name
+        self.conversation_history = []
+        self.mission_context = {}
+        
+    def analyze_mission_scenario(self, 
+                               mission_type: str, 
+                               environment_data: Dict[str, Any],
+                               threat_intelligence: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Семантичний аналіз сценарію місії за допомогою LLM"""
+        
+        # Формування контексту для LLM
+        context = f"""
+        Проаналізуй сценарій місії для рою дронів:
+        
+        Тип місії: {mission_type}
+        Середовище: {environment_data}
+        Розвідувальні дані про загрози: {threat_intelligence}
+        
+        Надай рекомендації по:
+        1. Оптимальній стратегії виконання
+        2. Ключових ризиках та способах їх мітигації
+        3. Розподілі ролей між дронами
+        4. Альтернативних планах дій
+        5. Критичних точках прийняття рішень
+        """
+        
+        # Симуляція відповіді LLM (в реальності тут був би API-виклик)
+        analysis = self._simulate_llm_response(context, mission_type)
+        
+        return {
+            'strategic_recommendations': analysis['strategy'],
+            'risk_assessment': analysis['risks'],
+            'role_distribution': analysis['roles'],
+            'contingency_plans': analysis['contingency'],
+            'decision_points': analysis['decisions'],
+            'confidence_score': analysis['confidence']
+        }
+    
+    def generate_mission_explanation(self, 
+                                   mission_parameters: Dict[str, Any],
+                                   decisions_made: List[Dict[str, Any]]) -> str:
+        """Генерація пояснень рішень місії"""
+        
+        context = f"""
+        Поясни логіку прийнятих рішень під час місії:
+        
+        Параметри місії: {mission_parameters}
+        Прийняті рішення: {decisions_made}
+        
+        Створи зрозуміле пояснення для оператора, чому були прийняті ці рішення.
+        """
+        
+        explanation = self._simulate_llm_explanation(context)
+        return explanation
+    
+    def adapt_mission_plan(self, 
+                          current_mission: Dict[str, Any],
+                          new_conditions: Dict[str, Any],
+                          available_resources: Dict[str, Any]) -> Dict[str, Any]:
+        """Адаптація плану місії до нових умов"""
+        
+        context = f"""
+        Адаптуй план місії до нових умов:
+        
+        Поточна місія: {current_mission}
+        Нові умови: {new_conditions}
+        Доступні ресурси: {available_resources}
+        
+        Запропонуй модифікації плану місії.
+        """
+        
+        adaptations = self._simulate_mission_adaptation(context)
+        return adaptations
+    
+    def _simulate_llm_response(self, context: str, mission_type: str) -> Dict[str, Any]:
+        """Симуляція відповіді LLM"""
+        
+        if mission_type == "reconnaissance":
+            return {
+                'strategy': [
+                    "Використовувати ешелоновану формацію для максимального покриття",
+                    "Призначити ведучий дрон з кращими сенсорами",
+                    "Застосувати адаптивні маршрути залежно від виявлених об'єктів"
+                ],
+                'risks': [
+                    {"risk": "Виявлення ворожими радарами", "mitigation": "Низьковисотний політ", "probability": 0.3},
+                    {"risk": "Погодні умови", "mitigation": "Моніторинг метеоданих", "probability": 0.2}
+                ],
+                'roles': {
+                    'leader': 1,
+                    'scouts': 2,
+                    'supporters': 1
+                },
+                'contingency': [
+                    "При втраті зв'язку - повернення на базу",
+                    "При виявленні загрози - перехід на резервний маршрут"
+                ],
+                'decisions': [
+                    {"point": "Початок місії", "options": ["Прямий маршрут", "Обхідний маршрут"]},
+                    {"point": "Виявлення цілі", "options": ["Детальна розвідка", "Швидке сканування"]}
+                ],
+                'confidence': 0.85
+            }
+        
+        # Додати інші типи місій...
+        return {
+            'strategy': ["Загальна стратегія"],
+            'risks': [{"risk": "Загальний ризик", "mitigation": "Загальна мітигація", "probability": 0.5}],
+            'roles': {'general': 4},
+            'contingency': ["Загальний план Б"],
+            'decisions': [{"point": "Загальна точка", "options": ["Опція 1", "Опція 2"]}],
+            'confidence': 0.7
+        }
+    
+    def _simulate_llm_explanation(self, context: str) -> str:
+        """Симуляція пояснення рішень"""
+        return """
+        Рішення були прийняті на основі аналізу ситуаційного контексту та пріоритетів місії.
+        
+        Ключові фактори:
+        1. Безпека рою - пріоритет номер один
+        2. Ефективність виконання завдання
+        3. Збереження ресурсів (енергія, час)
+        4. Адаптація до змінних умов середовища
+        
+        Алгоритм прийняття рішень враховував статистичні дані з попередніх місій
+        та поточні показники продуктивності кожного дрона в рої.
+        """
+    
+    def _simulate_mission_adaptation(self, context: str) -> Dict[str, Any]:
+        """Симуляція адаптації місії"""
+        return {
+            'route_modifications': [
+                {"type": "waypoint_change", "old_point": [100, 100, 50], "new_point": [120, 80, 45]},
+                {"type": "altitude_adjustment", "reason": "weather", "new_altitude": 40}
+            ],
+            'role_changes': [
+                {"drone_id": "alpha_1", "old_role": "scout", "new_role": "leader"},
+                {"drone_id": "alpha_2", "old_role": "leader", "new_role": "support"}
+            ],
+            'priority_updates': {
+                "surveillance": 0.8,
+                "data_collection": 0.6,
+                "safety": 1.0
+            },
+            'estimated_impact': {
+                "mission_duration": "+15%",
+                "success_probability": "+10%",
+                "resource_consumption": "+5%"
+            }
+        }
+
+# ==================== МОДУЛЬ АНАЛІЗУ ЗОБРАЖЕНЬ ====================
+
+class ImageAnalysisModule:
+    """Модуль аналізу зображень та комп'ютерного зору"""
+    
+    def __init__(self):
+        self.detection_models = {
+            'vehicle': self._vehicle_detection,
+            'person': self._person_detection,
+            'building': self._building_detection,
+            'anomaly': self._anomaly_detection
+        }
+        self.analysis_cache = {}
+        
+    def analyze_drone_imagery(self, 
+                            drone_id: str, 
+                            image_data: bytes, 
+                            analysis_type: str = 'comprehensive') -> Dict[str, Any]:
+        """Аналіз зображень від дронів"""
+        
+        try:
+            # Конвертація bytes в OpenCV format
+            nparr = np.frombuffer(image_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                return {'error': 'Неможливо декодувати зображення'}
+            
+            analysis_results = {
+                'drone_id': drone_id,
+                'timestamp': datetime.now().isoformat(),
+                'image_metadata': self._extract_image_metadata(image),
+                'detections': {},
+                'analysis_type': analysis_type
+            }
+            
+            # Виконання різних типів аналізу
+            if analysis_type == 'comprehensive':
+                for detection_type, detector in self.detection_models.items():
+                    analysis_results['detections'][detection_type] = detector(image)
+            else:
+                if analysis_type in self.detection_models:
+                    analysis_results['detections'][analysis_type] = self.detection_models[analysis_type](image)
+            
+            # Семантичний аналіз сцени
+            analysis_results['scene_analysis'] = self._analyze_scene_context(image, analysis_results['detections'])
+            
+            # Оцінка якості зображення
+            analysis_results['quality_metrics'] = self._assess_image_quality(image)
+            
+            return analysis_results
+            
+        except Exception as e:
+            logger.error(f"Помилка аналізу зображення від дрона {drone_id}: {str(e)}")
+            return {'error': str(e)}
+    
+    def _extract_image_metadata(self, image: np.ndarray) -> Dict[str, Any]:
+        """Витягування метаданих зображення"""
+        height, width = image.shape[:2]
+        return {
+            'width': width,
+            'height': height,
+            'channels': image.shape[2] if len(image.shape) > 2 else 1,
+            'size_mb': image.nbytes / (1024 * 1024),
+            'color_space': 'BGR' if len(image.shape) > 2 else 'GRAY'
+        }
+    
+    def _vehicle_detection(self, image: np.ndarray) -> List[Dict[str, Any]]:
+        """Виявлення транспортних засобів"""
+        # Симуляція детекції транспорту
+        detections = []
+        
+        # В реальності тут був би YOLO або інший детектор
+        num_vehicles = np.random.randint(0, 5)
+        
+        for i in range(num_vehicles):
+            detection = {
+                'id': f'vehicle_{i+1}',
+                'type': np.random.choice(['car', 'truck', 'tank', 'apc']),
+                'confidence': np.random.uniform(0.6, 0.95),
+                'bbox': {
+                    'x': np.random.randint(0, image.shape[1] - 100),
+                    'y': np.random.randint(0, image.shape[0] - 50),
+                    'width': np.random.randint(80, 150),
+                    'height': np.random.randint(40, 80)
+                },
+                'attributes': {
+                    'moving': np.random.choice([True, False]),
+                    'military': np.random.choice([True, False], p=[0.3, 0.7])
+                }
+            }
+            detections.append(detection)
+        
+        return detections
+    
+    def _person_detection(self, image: np.ndarray) -> List[Dict[str, Any]]:
+        """Виявлення людей"""
+        detections = []
+        num_persons = np.random.randint(0, 8)
+        
+        for i in range(num_persons):
+            detection = {
+                'id': f'person_{i+1}',
+                'confidence': np.random.uniform(0.5, 0.9),
+                'bbox': {
+                    'x': np.random.randint(0, image.shape[1] - 30),
+                    'y': np.random.randint(0, image.shape[0] - 60),
+                    'width': np.random.randint(25, 50),
+                    'height': np.random.randint(50, 100)
+                },
+                'attributes': {
+                    'activity': np.random.choice(['standing', 'walking', 'running']),
+                    'group_size': np.random.randint(1, 4)
+                }
+            }
+            detections.append(detection)
+        
+        return detections
+    
+    def _building_detection(self, image: np.ndarray) -> List[Dict[str, Any]]:
+        """Виявлення будівель та структур"""
+        detections = []
+        num_buildings = np.random.randint(1, 6)
+        
+        for i in range(num_buildings):
+            detection = {
+                'id': f'building_{i+1}',
+                'type': np.random.choice(['residential', 'commercial', 'industrial', 'military']),
+                'confidence': np.random.uniform(0.7, 0.95),
+                'bbox': {
+                    'x': np.random.randint(0, image.shape[1] - 200),
+                    'y': np.random.randint(0, image.shape[0] - 150),
+                    'width': np.random.randint(150, 300),
+                    'height': np.random.randint(100, 200)
+                },
+                'attributes': {
+                    'floors': np.random.randint(1, 10),
+                    'condition': np.random.choice(['good', 'damaged', 'destroyed']),
+                    'occupied': np.random.choice([True, False])
+                }
+            }
+            detections.append(detection)
+        
+        return detections
+    
+    def _anomaly_detection(self, image: np.ndarray) -> List[Dict[str, Any]]:
+        """Виявлення аномалій та незвичних об'єктів"""
+        anomalies = []
+        
+        # Симуляція виявлення аномалій
+        if np.random.random() < 0.2:  # 20% шанс виявити аномалію
+            anomaly = {
+                'id': 'anomaly_1',
+                'type': np.random.choice(['explosion', 'fire', 'debris', 'unknown_object']),
+                'confidence': np.random.uniform(0.4, 0.8),
+                'bbox': {
+                    'x': np.random.randint(0, image.shape[1] - 100),
+                    'y': np.random.randint(0, image.shape[0] - 100),
+                    'width': np.random.randint(50, 150),
+                    'height': np.random.randint(50, 150)
+                },
+                'urgency': np.random.choice(['low', 'medium', 'high']),
+                'description': 'Виявлено незвичну активність, потребує подальшого аналізу'
+            }
+            anomalies.append(anomaly)
+        
+        return anomalies
+    
+    def _analyze_scene_context(self, image: np.ndarray, detections: Dict[str, List]) -> Dict[str, Any]:
+        """Семантичний аналіз контексту сцени"""
+        
+        total_objects = sum(len(objects) for objects in detections.values())
+        
+        # Аналіз щільності об'єктів
+        density = total_objects / (image.shape[0] * image.shape[1] / 10000)  # об'єктів на 100x100 пікселів
+        
+        # Класифікація типу сцени
+        scene_type = 'unknown'
+        if 'building' in detections and len(detections['building']) > 2:
+            scene_type = 'urban'
+        elif 'vehicle' in detections and any(v['attributes'].get('military', False) for v in detections['vehicle']):
+            scene_type = 'military_zone'
+        elif total_objects < 3:
+            scene_type = 'rural'
+        
+        # Оцінка активності
+        activity_level = 'low'
+        if 'person' in detections:
+            moving_persons = sum(1 for p in detections['person'] 
+                               if p['attributes'].get('activity') in ['walking', 'running'])
+            if moving_persons > 3:
+                activity_level = 'high'
+            elif moving_persons > 0:
+                activity_level = 'medium'
+        
+        return {
+            'scene_type': scene_type,
+            'object_density': density,
+            'activity_level': activity_level,
+            'total_objects': total_objects,
+            'threat_assessment': self._assess_threats(detections),
+            'recommendations': self._generate_scene_recommendations(scene_type, detections)
+        }
+    
+    def _assess_image_quality(self, image: np.ndarray) -> Dict[str, Any]:
+        """Оцінка якості зображення"""
+        
+        # Розрахунок різкості (Laplacian variance)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) > 2 else image
+        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # Розрахунок яскравості
+        brightness = np.mean(gray)
+        
+        # Розрахунок контрастності
+        contrast = np.std(gray)
+        
+        # Загальна оцінка якості
+        quality_score = min(100, (sharpness / 100 + contrast / 50 + min(brightness, 255-brightness) / 50) * 33.33)
+        
+        return {
+            'sharpness': float(sharpness),
+            'brightness': float(brightness),
+            'contrast': float(contrast),
+            'quality_score': float(quality_score),
+            'usable': quality_score > 50
+        }
+    
+    def _assess_threats(self, detections: Dict[str, List]) -> Dict[str, Any]:
+        """Оцінка загроз на основі виявлених об'єктів"""
+        threat_level = 'low'
+        threats = []
+        
+        # Перевірка військової техніки
+        if 'vehicle' in detections:
+            military_vehicles = [v for v in detections['vehicle'] if v['attributes'].get('military', False)]
+            if military_vehicles:
+                threat_level = 'high'
+                threats.append({
+                    'type': 'military_presence',
+                    'description': f'Виявлено {len(military_vehicles)} одиниць військової техніки',
+                    'severity': 'high'
+                })
+        
+        # Перевірка аномалій
+        if 'anomaly' in detections:
+            high_urgency_anomalies = [a for a in detections['anomaly'] if a.get('urgency') == 'high']
+            if high_urgency_anomalies:
+                threat_level = 'high'
+                threats.append({
+                    'type': 'anomalous_activity',
+                    'description': 'Виявлено підозрілу активність',
+                    'severity': 'high'
+                })
+        
+        return {
+            'threat_level': threat_level,
+            'identified_threats': threats,
+            'recommendation': 'immediate_analysis' if threat_level == 'high' else 'routine_monitoring'
+        }
+    
+    def _generate_scene_recommendations(self, scene_type: str, detections: Dict[str, List]) -> List[str]:
+        """Генерація рекомендацій на основі аналізу сцени"""
+        recommendations = []
+        
+        if scene_type == 'military_zone':
+            recommendations.extend([
+                'Збільшити висоту польоту для безпеки',
+                'Активувати режим скритності',
+                'Передати дані негайно'
+            ])
+        elif scene_type == 'urban':
+            recommendations.extend([
+                'Уникати низького польоту над житловими зонами',
+                'Моніторити авіаційний трафік'
+            ])
+        
+        if 'anomaly' in detections and detections['anomaly']:
+            recommendations.append('Провести додаткове сканування аномальної області')
+        
+        return recommendations
+
+# ==================== ПОГОДНИЙ МОДУЛЬ ====================
+
+class WeatherModule:
+    """Модуль прогнозування та моніторингу погодних умов"""
+    
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key
+        self.weather_cache = {}
+        self.cache_duration = 600  # 10 хвилин
+        
+    def get_current_weather(self, latitude: float, longitude: float) -> Dict[str, Any]:
+        """Отримання поточних погодних умов"""
+        
+        cache_key = f"{latitude}_{longitude}"
+        current_time = time.time()
+        
+        # Перевірка кешу
+        if (cache_key in self.weather_cache and 
+            current_time - self.weather_cache[cache_key]['timestamp'] < self.cache_duration):
+            return self.weather_cache[cache_key]['data']
+        
+        # Симуляція API-виклику (в реальності - OpenWeatherMap або подібний сервіс)
+        weather_data = self._simulate_weather_api(latitude, longitude)
+        
+        # Кешування
+        self.weather_cache[cache_key] = {
+            'data': weather_data,
+            'timestamp': current_time
+        }
+        
+        return weather_data
+    
+    def get_weather_forecast(self, latitude: float, longitude: float, hours: int = 24) -> List[Dict[str, Any]]:
+        """Прогноз погоди на найближчі години"""
+        
+        forecast = []
+        current_time = datetime.now()
+        
+        for hour in range(hours):
+            forecast_time = current_time + timedelta(hours=hour)
+            
+            # Симуляція прогнозу з варіаціями
+            base_weather = self._simulate_weather_api(latitude, longitude)
+            
+            # Додавання варіацій для майбутніх годин
+            forecast_weather = self._add_forecast_variations(base_weather, hour)
+            forecast_weather['forecast_time'] = forecast_time.isoformat()
+            forecast_weather['confidence'] = max(0.5, 1.0 - hour * 0.02)  # Зменшення точності з часом
+            
+            forecast.append(forecast_weather)
+        
+        return forecast
+    
+    def assess_flight_conditions(self, weather_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Оцінка умов для польоту дронів"""
+        
+        # Критерії безпеки польоту
+        wind_speed = weather_data.get('wind_speed', 0)
+        visibility = weather_data.get('visibility', 10000)
+        precipitation = weather_data.get('precipitation_intensity', 0)
+        temperature = weather_data.get('temperature', 20)
+        
+        # Оцінка кожного параметру
+        wind_status = self._assess_wind_conditions(wind_speed)
+        visibility_status = self._assess_visibility_conditions(visibility)
+        precipitation_status = self._assess_precipitation_conditions(precipitation)
+        temperature_status = self._assess_temperature_conditions(temperature)
+        
+        # Загальна оцінка
+        overall_status = self._calculate_overall_flight_status([
+            wind_status, visibility_status, precipitation_status, temperature_status
+        ])
+        
+        return {
+            'overall_status': overall_status,
+            'flight_safety_score': self._calculate_safety_score(weather_data),
+            'conditions': {
+                'wind': wind_status,
+                'visibility': visibility_status,
+                'precipitation': precipitation_status,
+                'temperature': temperature_status
+            },
+            'recommendations': self._generate_flight_recommendations(weather_data),
+            'restrictions': self._determine_flight_restrictions(weather_data)
+        }
+    
+    def _simulate_weather_api(self, latitude: float, longitude: float) -> Dict[str, Any]:
+        """Симуляція API погодного сервісу"""
+        
+        # Базові значення з варіаціями
+        return {
+            'location': {'latitude': latitude, 'longitude': longitude},
+            'temperature': np.random.uniform(-10, 35),  # °C
+            'humidity': np.random.uniform(30, 90),  # %
+            'pressure': np.random.uniform(990, 1030),  # hPa
+            'wind_speed': np.random.exponential(3),  # м/с
+            'wind_direction': np.random.uniform(0, 360),  # градуси
+            'visibility': np.random.uniform(1000, 15000),  # метри
+            'cloud_cover': np.random.uniform(0, 100),  # %
+            'precipitation_intensity': np.random.exponential(0.5),  # мм/год
+            'precipitation_type': np.random.choice(['none', 'rain', 'snow', 'sleet'], p=[0.7, 0.2, 0.05, 0.05]),
+            'conditions': np.random.choice(['clear', 'partly_cloudy', 'cloudy', 'overcast', 'fog'], 
+                                         p=[0.3, 0.3, 0.2, 0.15, 0.05]),
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def _add_forecast_variations(self, base_weather: Dict[str, Any], hour_offset: int) -> Dict[str, Any]:
+        """Додавання варіацій для прогнозу"""
+        
+        forecast = base_weather.copy()
+        
+        # Природні варіації погоди з часом
+        forecast['temperature'] += np.random.normal(0, 2) + np.sin(hour_offset * np.pi / 12) * 5
+        forecast['wind_speed'] *= (1 + np.random.normal(0, 0.2))
+        forecast['wind_direction'] += np.random.normal(0, 30)
+        forecast['humidity'] += np.random.normal(0, 10)
+        forecast['pressure'] += np.random.normal(0, 5)
+        
+        # Обмеження значень
+        forecast['wind_speed'] = max(0, forecast['wind_speed'])
+        forecast['wind_direction'] = forecast['wind_direction'] % 360
+        forecast['humidity'] = np.clip(forecast['humidity'], 0, 100)
+        forecast['temperature'] = np.clip(forecast['temperature'], -40, 50)
+        
+        return forecast
+    
+    def _assess_wind_conditions(self, wind_speed: float) -> Dict[str, Any]:
+        """Оцінка вітрових умов"""
+        if wind_speed < 5:
+            status = 'excellent'
+            impact = 'minimal'
+        elif wind_speed < 10:
+            status = 'good'
+            impact = 'slight'
+        elif wind_speed < 15:
+            status = 'marginal'
+            impact = 'moderate'
+        else:
+            status = 'poor'
+            impact = 'severe'
+        
+        return {
+            'status': status,
+            'impact': impact,
+            'wind_speed': wind_speed,
+            'max_safe_speed': min(wind_speed * 0.8, 12)  # Рекомендована максимальна швидкість дрона
+        }
+    
+    def _assess_visibility_conditions(self, visibility: float) -> Dict[str, Any]:
+        """Оцінка умов видимості"""
+        if visibility > 10000:
+            status = 'excellent'
+        elif visibility > 5000:
+            status = 'good'
+        elif visibility > 1000:
+            status = 'marginal'
+        else:
+            status = 'poor'
+        
+        return {
+            'status': status,
+            'visibility_meters': visibility,
+            'safe_range': min(visibility * 0.8, 1000)  # Безпечна дальність польоту
+        }
+    
+    def _assess_precipitation_conditions(self, precipitation: float) -> Dict[str, Any]:
+        """Оцінка опадів"""
+        if precipitation < 0.1:
+            status = 'excellent'
+        elif precipitation < 1.0:
+            status = 'good'
+        elif precipitation < 5.0:
+            status = 'marginal'
+        else:
+            status = 'poor'
+        
+        return {
+            'status': status,
+            'intensity': precipitation,
+            'equipment_protection_needed': precipitation > 1.0
+        }
+    
+    def _assess_temperature_conditions(self, temperature: float) -> Dict[str, Any]:
+        """Оцінка температурних умов"""
+        if -5 <= temperature <= 35:
+            status = 'excellent'
+        elif -15 <= temperature <= 45:
+            status = 'good'
+        elif -25 <= temperature <= 50:
+            status = 'marginal'
+        else:
+            status = 'poor'
+        
+        return {
+            'status': status,
+            'temperature': temperature,
+            'battery_impact': abs(temperature - 20) * 0.02  # Вплив на час роботи батареї
+        }
+    
+    def _calculate_overall_flight_status(self, status_list: List[Dict[str, Any]]) -> str:
+        """Розрахунок загального статусу умов польоту"""
+        status_values = {'excellent': 4, 'good': 3, 'marginal': 2, 'poor': 1}
+        
+        avg_score = np.mean([status_values[status['status']] for status in status_list])
+        
+        if avg_score >= 3.5:
+            return 'excellent'
+        elif avg_score >= 2.5:
+            return 'good'
+        elif avg_score >= 1.5:
+            return 'marginal'
+        else:
+            return 'poor'
+    
+    def _calculate_safety_score(self, weather_data: Dict[str, Any]) -> float:
+        """Розрахунок числової оцінки безпеки польоту (0-100)"""
+        
+        # Нормалізація параметрів до шкали 0-1
+        wind_score = max(0, 1 - weather_data['wind_speed'] / 20)
+        visibility_score = min(1, weather_data['visibility'] / 10000)
+        precip_score = max(0, 1 - weather_data['precipitation_intensity'] / 10)
+        temp_score = max(0, 1 - abs(weather_data['temperature'] - 20) / 40)
+        
+        # Зважена сума
+        weights = {'wind': 0.3, 'visibility': 0.25, 'precipitation': 0.25, 'temperature': 0.2}
+        
+        safety_score = (wind_score * weights['wind'] + 
+                       visibility_score * weights['visibility'] + 
+                       precip_score * weights['precipitation'] + 
+                       temp_score * weights['temperature']) * 100
+        
+        return round(safety_score, 1)
+    
+    def _generate_flight_recommendations(self, weather_data: Dict[str, Any]) -> List[str]:
+        """Генерація рекомендацій для польоту"""
+        recommendations = []
+        
+        if weather_data['wind_speed'] > 10:
+            recommendations.append("Зменшити швидкість польоту через сильний вітер")
+            recommendations.append("Уникати різких маневрів")
+        
+        if weather_data['visibility'] < 5000:
+            recommendations.append("Активувати додаткові навігаційні системи")
+            recommendations.append("Зменшити дальність польоту")
+        
+        if weather_data['precipitation_intensity'] > 1.0:
+            recommendations.append("Використовувати водозахищені дрони")
+            recommendations.append("Скоротити тривалість місії")
+        
+        if weather_data['temperature'] < -10 or weather_data['temperature'] > 40:
+            recommendations.append("Моніторити стан батарей більш часто")
+            recommendations.append("Підготувати резервні батареї")
+        
+        return recommendations
+    
+    def _determine_flight_restrictions(self, weather_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Визначення обмежень польоту"""
+        restrictions = {
+            'max_altitude': 120,  # метри
+            'max_range': 5000,    # метри
+            'max_duration': 1800, # секунди
+            'prohibited_areas': []
+        }
+        
+        # Обмеження через вітер
+        if weather_data['wind_speed'] > 15:
+            restrictions['max_altitude'] = 50
+            restrictions['max_range'] = 2000
+        
+        # Обмеження через видимість
+        if weather_data['visibility'] < 1000:
+            restrictions['max_range'] = min(restrictions['max_range'], 500)
+        
+        # Обмеження через опади
+        if weather_data['precipitation_intensity'] > 5:
+            restrictions['max_duration'] = 900  # 15 хвилин
+        
+        # Температурні обмеження
+        if weather_data['temperature'] < -20 or weather_data['temperature'] > 45:
+            restrictions['max_duration'] = min(restrictions['max_duration'], 1200)
+        
+        return restrictions
+
+# ==================== МОДУЛЬ РАДІОЕЛЕКТРОННОЇ БОРОТЬБИ ====================
+
+class ElectronicWarfareModule:
+    """Модуль аналізу та протидії радіоелектронній боротьбі"""
+    
+    def __init__(self):
+        self.signal_analyzers = {
+            'gps_jamming': self._analyze_gps_jamming,
+            'communication_jamming': self._analyze_comm_jamming,
+            'radar_detection': self._analyze_radar_signals,
+            'electronic_attacks': self._analyze_electronic_attacks
+        }
+        self.threat_database = self._load_threat_signatures()
+        self.countermeasures = self._load_countermeasures()
+    
+    def analyze_electromagnetic_environment(self, 
+                                          location: Tuple[float, float],
+                                          signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз електромагнітного середовища"""
+        
+        analysis_results = {
+            'location': location,
+            'timestamp': datetime.now().isoformat(),
+            'threat_assessment': {},
+            'signal_analysis': {},
+            'recommended_countermeasures': [],
+            'risk_level': 'low'
+        }
+        
+        # Аналіз різних типів сигналів
+        for signal_type, analyzer in self.signal_analyzers.items():
+            if signal_type in signal_data:
+                analysis_results['signal_analysis'][signal_type] = analyzer(signal_data[signal_type])
+        
+        # Загальна оцінка загроз
+        analysis_results['threat_assessment'] = self._assess_overall_threats(analysis_results['signal_analysis'])
+        
+        # Визначення рівня ризику
+        analysis_results['risk_level'] = self._calculate_risk_level(analysis_results['threat_assessment'])
+        
+        # Рекомендації щодо контрзаходів
+        analysis_results['recommended_countermeasures'] = self._recommend_countermeasures(
+            analysis_results['threat_assessment']
+        )
+        
+        return analysis_results
+    
+    def _load_threat_signatures(self) -> Dict[str, Dict[str, Any]]:
+        """Завантаження сигнатур відомих загроз"""
+        return {
+            'gps_jammer_type1': {
+                'frequency_range': [1575.42, 1575.42],  # MHz
+                'power_threshold': -130,  # dBm
+                'modulation': 'continuous_wave',
+                'threat_level': 'high'
+            },
+            'comm_jammer_type1': {
+                'frequency_range': [2400, 2500],  # MHz
+                'power_threshold': -100,
+                'modulation': 'swept_frequency',
+                'threat_level': 'medium'
+            },
+            'radar_system_type1': {
+                'frequency_range': [8000, 12000],  # MHz
+                'pulse_width': 1e-6,  # секунди
+                'prf': 1000,  # Hz
+                'threat_level': 'high'
+            }
+        }
+    
+    def _load_countermeasures(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Завантаження доступних контрзаходів"""
+        return {
+            'gps_jamming': [
+                {
+                    'name': 'alternative_navigation',
+                    'description': 'Перехід на інерційну навігацію та візуальну одометрію',
+                    'effectiveness': 0.8,
+                    'implementation_time': 5  # секунди
+                },
+                {
+                    'name': 'frequency_hopping',
+                    'description': 'Стрибкоподібна зміна частот GPS-приймача',
+                    'effectiveness': 0.6,
+                    'implementation_time': 2
+                }
+            ],
+            'communication_jamming': [
+                {
+                    'name': 'frequency_diversity',
+                    'description': 'Використання множинних частотних каналів',
+                    'effectiveness': 0.7,
+                    'implementation_time': 3
+                },
+                {
+                    'name': 'mesh_networking',
+                    'description': 'Перехід на мережевий режим зв\'язку через інші дрони',
+                    'effectiveness': 0.9,
+                    'implementation_time': 10
+                }
+            ],
+            'radar_detection': [
+                {
+                    'name': 'stealth_mode',
+                    'description': 'Зменшення радіолокаційної помітності',
+                    'effectiveness': 0.8,
+                    'implementation_time': 1
+                },
+                {
+                    'name': 'evasive_maneuvers',
+                    'description': 'Ухилення траєкторією польоту',
+                    'effectiveness': 0.6,
+                    'implementation_time': 5
+                }
+            ]
+        }
+    
+    def _analyze_gps_jamming(self, signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз GPS-глушіння"""
+        
+        # Симуляція аналізу GPS-сигналів
+        gps_signal_strength = signal_data.get('gps_signal_strength', -130)  # dBm
+        gps_satellites = signal_data.get('visible_satellites', 8)
+        position_accuracy = signal_data.get('position_accuracy', 2.0)  # метри
+        
+        jamming_detected = False
+        jamming_intensity = 0.0
+        
+        # Критерії виявлення глушіння
+        if gps_signal_strength < -140 or gps_satellites < 4 or position_accuracy > 10:
+            jamming_detected = True
+            jamming_intensity = 1.0 - (gps_signal_strength + 150) / 20  # Нормалізація
+            jamming_intensity = np.clip(jamming_intensity, 0, 1)
+        
+        return {
+            'jamming_detected': jamming_detected,
+            'jamming_intensity': jamming_intensity,
+            'signal_strength': gps_signal_strength,
+            'visible_satellites': gps_satellites,
+            'position_accuracy': position_accuracy,
+            'threat_level': 'high' if jamming_intensity > 0.7 else 'medium' if jamming_intensity > 0.3 else 'low'
+        }
+    
+    def _analyze_comm_jamming(self, signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз глушіння каналів зв'язку"""
+        
+        comm_signal_strength = signal_data.get('comm_signal_strength', -80)  # dBm
+        packet_loss_rate = signal_data.get('packet_loss_rate', 0.02)  # 2%
+        latency = signal_data.get('latency', 50)  # мс
+        
+        jamming_detected = False
+        jamming_intensity = 0.0
+        
+        # Критерії виявлення глушіння комунікацій
+        if comm_signal_strength < -100 or packet_loss_rate > 0.1 or latency > 200:
+            jamming_detected = True
+            jamming_intensity = max(
+                (100 + comm_signal_strength) / 20,
+                packet_loss_rate * 5,
+                (latency - 50) / 200
+            )
+            jamming_intensity = np.clip(jamming_intensity, 0, 1)
+        
+        return {
+            'jamming_detected': jamming_detected,
+            'jamming_intensity': jamming_intensity,
+            'signal_strength': comm_signal_strength,
+            'packet_loss_rate': packet_loss_rate,
+            'latency': latency,
+            'threat_level': 'high' if jamming_intensity > 0.7 else 'medium' if jamming_intensity > 0.3 else 'low'
+        }
+    
+    def _analyze_radar_signals(self, signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз радарних сигналів"""
+        
+        radar_contacts = signal_data.get('radar_contacts', [])
+        signal_strength = signal_data.get('max_signal_strength', -120)  # dBm
+        
+        threat_radars = []
+        max_threat_level = 'low'
+        
+        for contact in radar_contacts:
+            frequency = contact.get('frequency', 0)
+            power = contact.get('power', -150)
+            
+            # Перевірка з базою сигнатур
+            for threat_name, signature in self.threat_database.items():
+                if ('radar' in threat_name and 
+                    signature['frequency_range'][0] <= frequency <= signature['frequency_range'][1] and
+                    power > signature['power_threshold']):
+                    
+                    threat_radars.append({
+                        'type': threat_name,
+                        'frequency': frequency,
+                        'power': power,
+                        'threat_level': signature['threat_level']
+                    })
+                    
+                    if signature['threat_level'] == 'high':
+                        max_threat_level = 'high'
+                    elif signature['threat_level'] == 'medium' and max_threat_level != 'high':
+                        max_threat_level = 'medium'
+        
+        return {
+            'radar_detected': len(threat_radars) > 0,
+            'threat_radars': threat_radars,
+            'max_signal_strength': signal_strength,
+            'threat_level': max_threat_level
+        }
+    
+    def _analyze_electronic_attacks(self, signal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз електронних атак"""
+        
+        suspicious_signals = signal_data.get('suspicious_signals', [])
+        spoofing_detected = signal_data.get('spoofing_detected', False)
+        interference_level = signal_data.get('interference_level', 0.0)
+        
+        attacks_detected = []
+        
+        if spoofing_detected:
+            attacks_detected.append({
+                'type': 'gps_spoofing',
+                'description': 'Виявлено підробку GPS-сигналів',
+                'threat_level': 'high'
+            })
+        
+        if interference_level > 0.5:
+            attacks_detected.append({
+                'type': 'broad_spectrum_interference',
+                'description': 'Виявлено широкосмуговие перешкоди',
+                'threat_level': 'medium'
+            })
+        
+        return {
+            'attacks_detected': len(attacks_detected) > 0,
+            'attack_types': attacks_detected,
+            'interference_level': interference_level,
+            'threat_level': 'high' if any(a['threat_level'] == 'high' for a in attacks_detected) else 'medium'
+        }
+    
+    def _assess_overall_threats(self, signal_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Загальна оцінка загроз"""
+        
+        threat_levels = []
+        active_threats = []
+        
+        for analysis_type, analysis_data in signal_analysis.items():
+            if analysis_data.get('jamming_detected') or analysis_data.get('radar_detected') or analysis_data.get('attacks_detected'):
+                threat_level = analysis_data.get('threat_level', 'low')
+                threat_levels.append(threat_level)
+                active_threats.append({
+                    'type': analysis_type,
+                    'level': threat_level,
+                    'details': analysis_data
+                })
+        
+        # Визначення загального рівня загрози
+        if 'high' in threat_levels:
+            overall_threat = 'high'
+        elif 'medium' in threat_levels:
+            overall_threat = 'medium'
+        elif threat_levels:
+            overall_threat = 'low'
+        else:
+            overall_threat = 'none'
+        
+        return {
+            'overall_threat_level': overall_threat,
+            'active_threats': active_threats,
+            'threats_count': len(active_threats),
+            'critical_threats': [t for t in active_threats if t['level'] == 'high']
+        }
+    
+    def _calculate_risk_level(self, threat_assessment: Dict[str, Any]) -> str:
+        """Розрахунок загального рівня ризику"""
+        
+        threat_level = threat_assessment['overall_threat_level']
+        critical_threats = len(threat_assessment['critical_threats'])
+        
+        if threat_level == 'high' or critical_threats > 2:
+            return 'critical'
+        elif threat_level == 'medium' or critical_threats > 0:
+            return 'elevated'
+        elif threat_level == 'low':
+            return 'moderate'
+        else:
+            return 'low'
+    
+    def _recommend_countermeasures(self, threat_assessment: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Рекомендації щодо контрзаходів"""
+        
+        recommendations = []
+        
+        for threat in threat_assessment['active_threats']:
+            threat_type = threat['type']
+            
+            # Мапінг типів загроз до контрзаходів
+            countermeasure_mapping = {
+                'gps_jamming': 'gps_jamming',
+                'communication_jamming': 'communication_jamming',
+                'radar_detection': 'radar_detection'
+            }
+            
+            if threat_type in countermeasure_mapping:
+                available_countermeasures = self.countermeasures.get(countermeasure_mapping[threat_type], [])
+                
+                for countermeasure in available_countermeasures:
+                    recommendations.append({
+                        'threat_type': threat_type,
+                        'countermeasure': countermeasure,
+                        'priority': 'high' if threat['level'] == 'high' else 'medium'
+                    })
+        
+        # Сортування за пріоритетом та ефективністю
+        recommendations.sort(key=lambda x: (
+            x['priority'] == 'high',
+            x['countermeasure']['effectiveness']
+        ), reverse=True)
+        
+        return recommendations
+
+# ==================== МОДУЛЬ ІНТЕГРАЦІЇ OSINT ====================
+
+class OSINTModule:
+    """Модуль інтеграції відкритих джерел розвідки"""
+    
+    def __init__(self):
+        self.data_sources = {
+            'news_feeds': self._fetch_news_data,
+            'social_media': self._fetch_social_media,
+            'satellite_imagery': self._fetch_satellite_data,
+            'flight_tracking': self._fetch_flight_data,
+            'weather_alerts': self._fetch_weather_alerts
+        }
+        self.analysis_cache = {}
+    
+    def gather_intelligence(self, 
+                          location: Tuple[float, float],
+                          radius_km: float = 50,
+                          sources: List[str] = None) -> Dict[str, Any]:
+        """Збір розвідувальних даних з відкритих джерел"""
+        
+        if sources is None:
+            sources = list(self.data_sources.keys())
+        
+        intelligence_report = {
+            'location': location,
+            'radius_km': radius_km,
+            'collection_time': datetime.now().isoformat(),
+            'data_sources': {},
+            'threat_indicators': [],
+            'operational_factors': {},
+            'recommendations': []
+        }
+        
+        # Збір даних з кожного джерела
+        for source in sources:
+            if source in self.data_sources:
+                try:
+                    intelligence_report['data_sources'][source] = self.data_sources[source](location, radius_km)
+                except Exception as e:
+                    logger.error(f"Помилка збору даних з {source}: {str(e)}")
+                    intelligence_report['data_sources'][source] = {'error': str(e)}
+        
+        # Аналіз зібраних даних
+        intelligence_report['threat_indicators'] = self._analyze_threat_indicators(intelligence_report['data_sources'])
+        intelligence_report['operational_factors'] = self._analyze_operational_factors(intelligence_report['data_sources'])
+        intelligence_report['recommendations'] = self._generate_osint_recommendations(intelligence_report)
+        
+        return intelligence_report
+    
+    def _fetch_news_data(self, location: Tuple[float, float], radius_km: float) -> Dict[str, Any]:
+        """Збір новинних даних (симуляція)"""
+        
+        # В реальності тут був би API до новинних сервісів
+        news_items = []
+        
+        # Симуляція релевантних новин
+        news_types = [
+            'military_exercise', 'political_event', 'infrastructure_work', 
+            'emergency_situation', 'aviation_restriction'
+        ]
+        
+        for i in range(np.random.randint(0, 5)):
+            news_item = {
+                'id': f'news_{i+1}',
+                'type': np.random.choice(news_types),
+                'title': f'Новина {i+1} в регіоні',
+                'relevance_score': np.random.uniform(0.3, 0.9),
+                'distance_km': np.random.uniform(0, radius_km),
+                'timestamp': (datetime.now() - timedelta(hours=np.random.randint(1, 48))).isoformat(),
+                'impact_assessment': np.random.choice(['low', 'medium', 'high'])
+            }
+            news_items.append(news_item)
+        
+        return {
+            'news_count': len(news_items),
+            'news_items': news_items,
+            'high_relevance_count': len([n for n in news_items if n['relevance_score'] > 0.7])
+        }
+    
+    def _fetch_social_media(self, location: Tuple[float, float], radius_km: float) -> Dict[str, Any]:
+        """Збір даних соціальних мереж (симуляція)"""
+        
+        social_indicators = {
+            'activity_level': np.random.uniform(0.1, 1.0),
+            'sentiment_score': np.random.uniform(-1.0, 1.0),  # -1 негативний, +1 позитивний
+            'relevant_posts': np.random.randint(0, 50),
+            'trending_topics': [
+                f'topic_{i}' for i in range(np.random.randint(1, 6))
+            ],
+            'unusual_activity': np.random.choice([True, False], p=[0.2, 0.8])
+        }
+        
+        return social_indicators
+    
+    def _fetch_satellite_data(self, location: Tuple[float, float], radius_km: float) -> Dict[str, Any]:
+        """Збір супутникових даних (симуляція)"""
+        
+        satellite_analysis = {
+            'last_image_time': (datetime.now() - timedelta(hours=np.random.randint(1, 24))).isoformat(),
+            'cloud_cover_percent': np.random.uniform(0, 100),
+            'visible_changes': np.random.choice([True, False], p=[0.3, 0.7]),
+            'infrastructure_status': np.random.choice(['normal', 'damaged', 'under_construction']),
+            'vehicle_density': np.random.choice(['low', 'medium', 'high']),
+            'anomalous_objects': np.random.randint(0, 3)
+        }
+        
+        return satellite_analysis
+    
+    def _fetch_flight_data(self, location: Tuple[float, float], radius_km: float) -> Dict[str, Any]:
+        """Збір даних про авіаційний трафік (симуляція)"""
+        
+        flight_data = {
+            'active_flights': np.random.randint(0, 20),
+            'military_flights': np.random.randint(0, 3),
+            'restricted_airspace': np.random.choice([True, False], p=[0.3, 0.7]),
+            'notams_active': np.random.randint(0, 5),  # Повідомлення для льотчиків
+            'air_traffic_density': np.random.choice(['low', 'medium', 'high'])
+        }
+        
+        return flight_data
+    
+    def _fetch_weather_alerts(self, location: Tuple[float, float], radius_km: float) -> Dict[str, Any]:
+        """Збір метеорологічних попереджень (симуляція)"""
+        
+        weather_alerts = []
+        alert_types = ['wind', 'precipitation', 'temperature', 'visibility', 'thunderstorm']
+        
+        for alert_type in alert_types:
+            if np.random.random() < 0.2:  # 20% шанс для кожного типу
+                alert = {
+                    'type': alert_type,
+                    'severity': np.random.choice(['minor', 'moderate', 'severe']),
+                    'start_time': (datetime.now() + timedelta(hours=np.random.randint(0, 12))).isoformat(),
+                    'duration_hours': np.random.randint(1, 24)
+                }
+                weather_alerts.append(alert)
+        
+        return {
+            'active_alerts': len(weather_alerts),
+            'alerts': weather_alerts,
+            'severe_alerts': len([a for a in weather_alerts if a['severity'] == 'severe'])
+        }
+    
+    def _analyze_threat_indicators(self, data_sources: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Аналіз індикаторів загроз з OSINT-даних"""
+        
+        threat_indicators = []
+        
+        # Аналіз новинних даних
+        if 'news_feeds' in data_sources and 'news_items' in data_sources['news_feeds']:
+            for news_item in data_sources['news_feeds']['news_items']:
+                if news_item['type'] in ['military_exercise', 'emergency_situation'] and news_item['relevance_score'] > 0.6:
+                    threat_indicators.append({
+                        'source': 'news',
+                        'type': 'operational_risk',
+                        'description': f"Новинна подія: {news_item['type']}",
+                        'severity': news_item['impact_assessment'],
+                        'confidence': news_item['relevance_score']
+                    })
+        
+        # Аналіз авіаційного трафіку
+        if 'flight_tracking' in data_sources:
+            flight_data = data_sources['flight_tracking']
+            if flight_data.get('military_flights', 0) > 1:
+                threat_indicators.append({
+                    'source': 'aviation',
+                    'type': 'military_activity',
+                    'description': 'Підвищена військова авіаційна активність',
+                    'severity': 'medium',
+                    'confidence': 0.7
+                })
+            
+            if flight_data.get('restricted_airspace', False):
+                threat_indicators.append({
+                    'source': 'aviation',
+                    'type': 'airspace_restriction',
+                    'description': 'Активні обмеження повітряного простору',
+                    'severity': 'high',
+                    'confidence': 0.9
+                })
+        
+        # Аналіз соціальних мереж
+        if 'social_media' in data_sources:
+            social_data = data_sources['social_media']
+            if social_data.get('unusual_activity', False) and social_data.get('sentiment_score', 0) < -0.5:
+                threat_indicators.append({
+                    'source': 'social_media',
+                    'type': 'social_unrest',
+                    'description': 'Незвичайна активність та негативний настрій у соцмережах',
+                    'severity': 'medium',
+                    'confidence': 0.6
+                })
+        
+        return threat_indicators
+    
+    def _analyze_operational_factors(self, data_sources: Dict[str, Any]) -> Dict[str, Any]:
+        """Аналіз операційних факторів"""
+        
+        factors = {
+            'weather_impact': 'low',
+            'aviation_congestion': 'low',
+            'media_attention': 'low',
+            'infrastructure_status': 'normal',
+            'recommended_altitude': None,
+            'time_window_optimal': True
+        }
+        
+        # Погодні фактори
+        if 'weather_alerts' in data_sources:
+            weather_data = data_sources['weather_alerts']
+            if weather_data.get('severe_alerts', 0) > 0:
+                factors['weather_impact'] = 'high'
+            elif weather_data.get('active_alerts', 0) > 2:
+                factors['weather_impact'] = 'medium'
+        
+        # Авіаційне навантаження
+        if 'flight_tracking' in data_sources:
+            flight_data = data_sources['flight_tracking']
+            if flight_data.get('air_traffic_density') == 'high':
+                factors['aviation_congestion'] = 'high'
+                factors['recommended_altitude'] = 'below_500ft'
+        
+        # Медійна увага
+        if 'news_feeds' in data_sources:
+            news_data = data_sources['news_feeds']
+            if news_data.get('high_relevance_count', 0) > 3:
+                factors['media_attention'] = 'high'
+        
+        return factors
+    
+    def _generate_osint_recommendations(self, intelligence_report: Dict[str, Any]) -> List[str]:
+        """Генерація рекомендацій на основі OSINT-аналізу"""
+        
+        recommendations = []
+        
+        threat_indicators = intelligence_report['threat_indicators']
+        operational_factors = intelligence_report['operational_factors']
+        
+        # Рекомендації на основі загроз
+        high_severity_threats = [t for t in threat_indicators if t['severity'] == 'high']
+        if high_severity_threats:
+            recommendations.append("Розглянути відкладення місії через високий рівень загроз")
+            recommendations.append("Використовувати альтернативні маршрути")
+        
+        # Рекомендації щодо погоди
+        if operational_factors['weather_impact'] == 'high':
+            recommendations.append("Моніторити погодні умови перед стартом")
+            recommendations.append("Підготувати план евакуації при погіршенні погоди")
