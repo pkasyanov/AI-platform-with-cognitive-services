@@ -1413,3 +1413,7 @@ class TelemetryAnalyzer:
                         'drone_id': drone_id,
                         'datapoint_index': i,
                         'drop_amount': battery_drop,
+                        'severity': 'high' if battery_drop > 20 else 'medium'
+                    })
+        
+        return anomalies
