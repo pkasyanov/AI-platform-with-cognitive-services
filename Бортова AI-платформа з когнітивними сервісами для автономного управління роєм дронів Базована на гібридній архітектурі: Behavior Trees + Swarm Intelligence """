@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""
+Бортова AI-платформа з когнітивними сервісами для автономного управління роєм дронів
+Базована на гібридній архітектурі: Behavior Trees + Swarm Intelligence
+"""
+
+import asyncio
+import json
+import time
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+import threading
+import queue
+import logging
+from abc import ABC, abstractmethod
+
+# Налаштування логування
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==================== БАЗОВІ СТРУКТУРИ ДАНИХ ====================
+
+class DroneState(Enum):
+    IDLE = "idle"
+    MOVING = "moving"
+    SCANNING = "scanning"
+    ATTACKING = "attacking"
+    RETURNING = "returning"
+    EMERGENCY = "emergency"
+
+class MissionType(Enum):
+    RECONNAISSANCE = "reconnaissance"
+    PATROL = "patrol"
+    SEARCH_AND_DESTROY = "search_and_destroy"
+    SURVEILLANCE = "surveillance"
+
+@dataclass
+class Position:
+    x: float
+    y: float
+    z: float
+    
+    def distance_to(self, other: 'Position') -> float:
+        return np.sqrt((self.x - other.x)**2 + (self.y - other.y)**2 + (self.z - other.z)**2)
+
+@dataclass
+class DroneInfo:
+    drone_id: str
+    position: Position
+    state: DroneState
+    battery_level: float
+    velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    last_update: float = field(default_factory=time.time)
+
+@dataclass
+class ThreatInfo:
+    threat_id: str
+    position: Position
+    threat_type: str
+    confidence: float
+    detected_at: float
+
+@dataclass
+class PheromoneMarker:
+    position: Position
+    strength: float
+    marker_type: str
+    decay_rate: float = 0.1
+    created_at: float = field(default_factory=time.time)
+
+# ==================== BEHAVIOR TREES IMPLEMENTATION ====================
+
+class BTNodeStatus(Enum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+    RUNNING = "running"
+
+class BTNode(ABC):
+    def __init__(self, name: str):
+        self.name = name
+        self.children: List['BTNode'] = []
+        
+    @abstractmethod
+    def tick(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        pass
+        
+    def add_child(self, child: 'BTNode'):
+        self.children.append(child)
+
+class SequenceNode(BTNode):
+    """Виконує дочірні вузли послідовно, повертає SUCCESS лише якщо всі успішні"""
+    
+    def tick(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        for child in self.children:
+            result = child.tick(blackboard)
+            if result == BTNodeStatus.FAILURE:
+                return BTNodeStatus.FAILURE
+            elif result == BTNodeStatus.RUNNING:
+                return BTNodeStatus.RUNNING
+        return BTNodeStatus.SUCCESS
+
+class SelectorNode(BTNode):
+    """Виконує дочірні вузли до першого успішного"""
+    
+    def tick(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        for child in self.children:
+            result = child.tick(blackboard)
+            if result == BTNodeStatus.SUCCESS:
+                return BTNodeStatus.SUCCESS
+            elif result == BTNodeStatus.RUNNING:
+                return BTNodeStatus.RUNNING
+        return BTNodeStatus.FAILURE
+
+class ConditionNode(BTNode):
+    """Перевіряє умову"""
+    
+    def __init__(self, name: str, condition_func):
+        super().__init__(name)
+        self.condition_func = condition_func
+    
+    def tick(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        return BTNodeStatus.SUCCESS if self.condition_func(blackboard) else BTNodeStatus.FAILURE
+
+class ActionNode(BTNode):
+    """Виконує дію"""
+    
+    def __init__(self, name: str, action_func):
+        super().__init__(name)
+        self.action_func = action_func
+    
+    def tick(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        return self.action_func(blackboard)
+
+# ==================== SWARM OPTIMIZATION ALGORITHMS ====================
+
+class SwarmOptimizer:
+    """Базовий клас для ройових алгоритмів оптимізації"""
+    
+    def __init__(self, swarm_size: int):
+        self.swarm_size = swarm_size
+        self.positions = []
+        self.velocities = []
+        self.best_positions = []
+        self.best_fitness = []
+        self.global_best_position = None
+        self.global_best_fitness = float('inf')
+    
+    def optimize(self, objective_function, bounds: List[Tuple[float, float]], max_iterations: int = 100):
+        """Основний метод оптимізації"""
+        self._initialize_swarm(bounds)
+        
+        for iteration in range(max_iterations):
+            for i in range(self.swarm_size):
+                fitness = objective_function(self.positions[i])
+                
+                # Оновлення особистого найкращого
+                if fitness < self.best_fitness[i]:
+                    self.best_fitness[i] = fitness
+                    self.best_positions[i] = self.positions[i].copy()
+                
+                # Оновлення глобального найкращого
+                if fitness < self.global_best_fitness:
+                    self.global_best_fitness = fitness
+                    self.global_best_position = self.positions[i].copy()
+            
+            self._update_swarm()
+        
+        return self.global_best_position, self.global_best_fitness
+    
+    def _initialize_swarm(self, bounds: List[Tuple[float, float]]):
+        """Ініціалізація рою"""
+        dimensions = len(bounds)
+        self.positions = []
+        self.velocities = []
+        self.best_positions = []
+        self.best_fitness = [float('inf')] * self.swarm_size
+        
+        for _ in range(self.swarm_size):
+            position = [np.random.uniform(bound[0], bound[1]) for bound in bounds]
+            velocity = [np.random.uniform(-1, 1) for _ in range(dimensions)]
+            
+            self.positions.append(position)
+            self.velocities.append(velocity)
+            self.best_positions.append(position.copy())
+    
+    def _update_swarm(self):
+        """Оновлення позицій та швидкостей частинок"""
+        w = 0.5  # інерція
+        c1 = 1.5  # когнітивний коефіцієнт
+        c2 = 1.5  # соціальний коефіцієнт
+        
+        for i in range(self.swarm_size):
+            for j in range(len(self.positions[i])):
+                r1, r2 = np.random.random(), np.random.random()
+                
+                # Оновлення швидкості
+                cognitive = c1 * r1 * (self.best_positions[i][j] - self.positions[i][j])
+                social = c2 * r2 * (self.global_best_position[j] - self.positions[i][j])
+                
+                self.velocities[i][j] = w * self.velocities[i][j] + cognitive + social
+                
+                # Обмеження швидкості
+                self.velocities[i][j] = np.clip(self.velocities[i][j], -4, 4)
+                
+                # Оновлення позиції
+                self.positions[i][j] += self.velocities[i][j]
+
+# ==================== COGNITIVE CORE ====================
+
+class CognitiveCore:
+    """Когнітивне ядро дрона з адаптивним плануванням поведінки"""
+    
+    def __init__(self, drone_id: str):
+        self.drone_id = drone_id
+        self.blackboard = {
+            'drone_id': drone_id,
+            'current_position': Position(0, 0, 0),
+            'target_position': None,
+            'battery_level': 100.0,
+            'state': DroneState.IDLE,
+            'threats': [],
+            'swarm_info': {},
+            'mission_type': MissionType.PATROL,
+            'pheromone_map': []
+        }
+        
+        self.behavior_tree = self._build_behavior_tree()
+        self.swarm_optimizer = SwarmOptimizer(swarm_size=5)
+        
+    def _build_behavior_tree(self) -> BTNode:
+        """Побудова дерева поведінки"""
+        
+        # Умови
+        battery_ok = ConditionNode("BatteryOK", lambda bb: bb['battery_level'] > 20)
+        has_target = ConditionNode("HasTarget", lambda bb: bb['target_position'] is not None)
+        threat_detected = ConditionNode("ThreatDetected", lambda bb: len(bb['threats']) > 0)
+        
+        # Дії
+        patrol_action = ActionNode("Patrol", self._patrol_action)
+        move_to_target = ActionNode("MoveToTarget", self._move_to_target_action)
+        avoid_threat = ActionNode("AvoidThreat", self._avoid_threat_action)
+        return_home = ActionNode("ReturnHome", self._return_home_action)
+        
+        # Структура дерева
+        root = SelectorNode("Root")
+        
+        # Аварійні ситуації
+        emergency_sequence = SequenceNode("Emergency")
+        emergency_condition = ConditionNode("LowBattery", lambda bb: bb['battery_level'] <= 20)
+        emergency_sequence.add_child(emergency_condition)
+        emergency_sequence.add_child(return_home)
+        
+        # Уникнення загроз
+        threat_sequence = SequenceNode("ThreatResponse")
+        threat_sequence.add_child(threat_detected)
+        threat_sequence.add_child(avoid_threat)
+        
+        # Нормальні операції
+        normal_ops = SelectorNode("NormalOperations")
+        
+        # Рух до цілі
+        target_sequence = SequenceNode("TargetSequence")
+        target_sequence.add_child(battery_ok)
+        target_sequence.add_child(has_target)
+        target_sequence.add_child(move_to_target)
+        
+        # Патрулювання
+        patrol_sequence = SequenceNode("PatrolSequence")
+        patrol_sequence.add_child(battery_ok)
+        patrol_sequence.add_child(patrol_action)
+        
+        normal_ops.add_child(target_sequence)
+        normal_ops.add_child(patrol_sequence)
+        
+        root.add_child(emergency_sequence)
+        root.add_child(threat_sequence)
+        root.add_child(normal_ops)
+        
+        return root
+    
+    def _patrol_action(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        """Дія патрулювання"""
+        current_pos = blackboard['current_position']
+        
+        # Генерація нової точки патрулювання з урахуванням феромонів
+        new_target = self._generate_patrol_point(current_pos, blackboard['pheromone_map'])
+        blackboard['target_position'] = new_target
+        blackboard['state'] = DroneState.MOVING
+        
+        logger.info(f"Drone {self.drone_id}: Патрулювання до точки {new_target.x:.1f}, {new_target.y:.1f}")
+        return BTNodeStatus.SUCCESS
+    
+    def _move_to_target_action(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        """Дія руху до цілі"""
+        current_pos = blackboard['current_position']
+        target_pos = blackboard['target_position']
+        
+        if not target_pos:
+            return BTNodeStatus.FAILURE
+        
+        distance = current_pos.distance_to(target_pos)
+        
+        if distance < 1.0:  # Досягли цілі
+            blackboard['target_position'] = None
+            blackboard['state'] = DroneState.IDLE
+            logger.info(f"Drone {self.drone_id}: Досягнуто цілі")
+            return BTNodeStatus.SUCCESS
+        
+        # Рух до цілі (симуляція)
+        direction = np.array([target_pos.x - current_pos.x, 
+                             target_pos.y - current_pos.y, 
+                             target_pos.z - current_pos.z])
+        direction = direction / np.linalg.norm(direction)
+        
+        speed = 2.0  # м/с
+        new_pos = Position(
+            current_pos.x + direction[0] * speed * 0.1,
+            current_pos.y + direction[1] * speed * 0.1,
+            current_pos.z + direction[2] * speed * 0.1
+        )
+        
+        blackboard['current_position'] = new_pos
+        blackboard['battery_level'] -= 0.1
+        
+        return BTNodeStatus.RUNNING
+    
+    def _avoid_threat_action(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        """Дія уникнення загрози"""
+        threats = blackboard['threats']
+        current_pos = blackboard['current_position']
+        
+        if not threats:
+            return BTNodeStatus.SUCCESS
+        
+        # Знаходимо найближчу загрозу
+        nearest_threat = min(threats, key=lambda t: current_pos.distance_to(t.position))
+        
+        # Розраховуємо напрям уникнення
+        avoid_direction = np.array([
+            current_pos.x - nearest_threat.position.x,
+            current_pos.y - nearest_threat.position.y,
+            current_pos.z - nearest_threat.position.z
+        ])
+        
+        if np.linalg.norm(avoid_direction) == 0:
+            avoid_direction = np.array([1, 0, 0])  # Дефолтний напрям
+        else:
+            avoid_direction = avoid_direction / np.linalg.norm(avoid_direction)
+        
+        # Рух у протилежному напрямі
+        escape_distance = 10.0
+        escape_pos = Position(
+            current_pos.x + avoid_direction[0] * escape_distance,
+            current_pos.y + avoid_direction[1] * escape_distance,
+            current_pos.z + avoid_direction[2] * escape_distance
+        )
+        
+        blackboard['target_position'] = escape_pos
+        blackboard['state'] = DroneState.EMERGENCY
+        
+        logger.warning(f"Drone {self.drone_id}: Уникання загрози, рух до {escape_pos.x:.1f}, {escape_pos.y:.1f}")
+        return BTNodeStatus.SUCCESS
+    
+    def _return_home_action(self, blackboard: Dict[str, Any]) -> BTNodeStatus:
+        """Дія повернення на базу"""
+        home_position = Position(0, 0, 0)  # Базова позиція
+        blackboard['target_position'] = home_position
+        blackboard['state'] = DroneState.RETURNING
+        
+        logger.info(f"Drone {self.drone_id}: Повернення на базу")
+        return BTNodeStatus.SUCCESS
+    
+    def _generate_patrol_point(self, current_pos: Position, pheromone_map: List[PheromoneMarker]) -> Position:
+        """Генерація точки патрулювання з урахуванням стигмергії"""
+        
+        # Діапазон патрулювання
+        patrol_radius = 20.0
+        
+        # Якщо є феромони, уникаємо густонаселених областей
+        best_score = float('-inf')
+        best_point = None
+        
+        for _ in range(10):  # Генеруємо кілька кандидатів
+            angle = np.random.uniform(0, 2 * np.pi)
+            distance = np.random.uniform(5.0, patrol_radius)
+            
+            candidate = Position(
+                current_pos.x + distance * np.cos(angle),
+                current_pos.y + distance * np.sin(angle),
+                current_pos.z + np.random.uniform(-2, 2)
+            )
+            
+            # Оцінка точки (менше феромонів = краще)
+            score = self._evaluate_patrol_point(candidate, pheromone_map)
+            
+            if score > best_score:
+                best_score = score
+                best_point = candidate
+        
+        return best_point or Position(
+            current_pos.x + np.random.uniform(-10, 10),
+            current_pos.y + np.random.uniform(-10, 10),
+            current_pos.z
+        )
+    
+    def _evaluate_patrol_point(self, point: Position, pheromone_map: List[PheromoneMarker]) -> float:
+        """Оцінка привабливості точки патрулювання"""
+        score = 1.0
+        
+        # Зменшуємо оцінку для областей з високою концентрацією феромонів
+        for marker in pheromone_map:
+            distance = point.distance_to(marker.position)
+            if distance < 5.0:  # Зона впливу феромону
+                age = time.time() - marker.created_at
+                current_strength = marker.strength * np.exp(-marker.decay_rate * age)
+                score -= current_strength * (5.0 - distance) / 5.0
+        
+        return score
+    
+    def update(self, swarm_info: Dict[str, DroneInfo], detected_threats: List[ThreatInfo]):
+        """Оновлення стану когнітивного ядра"""
+        self.blackboard['swarm_info'] = swarm_info
+        self.blackboard['threats'] = detected_threats
+        
+        # Додаємо феромони в поточну позицію
+        current_pos = self.blackboard['current_position']
+        pheromone = PheromoneMarker(
+            position=current_pos,
+            strength=1.0,
+            marker_type="patrol"
+        )
+        self.blackboard['pheromone_map'].append(pheromone)
+        
+        # Очищаємо старі феромони
+        current_time = time.time()
+        self.blackboard['pheromone_map'] = [
+            marker for marker in self.blackboard['pheromone_map']
+            if (current_time - marker.created_at) < 60.0  # Видаляємо феромони старше 1 хвилини
+        ]
+        
+        # Виконуємо дерево поведінки
+        result = self.behavior_tree.tick(self.blackboard)
+        
+        return result
+
+# ==================== COMMUNICATION MODULE ====================
+
+class CommunicationModule:
+    """Модуль комунікації для обміну даними між дронами в рої"""
+    
+    def __init__(self, drone_id: str):
+        self.drone_id = drone_id
+        self.message_queue = queue.Queue()
+        self.subscribers = {}
+        self.swarm_state = {}
+        
+    def broadcast_state(self, drone_info: DroneInfo):
+        """Розсилання стану дрона іншим членам рою"""
+        message = {
+            'type': 'state_update',
+            'sender': self.drone_id,
+            'data': drone_info,
+            'timestamp': time.time()
+        }
+        
+        # Симуляція розсилання (в реальній системі тут був би DDS/RTPS)
+        logger.debug(f"Broadcasting state from {self.drone_id}")
+        
+    def receive_state_update(self, sender_id: str, drone_info: DroneInfo):
+        """Отримання оновлення стану від іншого дрона"""
+        self.swarm_state[sender_id] = drone_info
+        
+    def get_swarm_state(self) -> Dict[str, DroneInfo]:
+        """Отримання поточного стану рою"""
+        return self.swarm_state.copy()
+
+# ==================== DRONE AGENT ====================
+
+class DroneAgent:
+    """Основний клас дрона з повною AI-платформою"""
+    
+    def __init__(self, drone_id: str, initial_position: Position):
+        self.drone_id = drone_id
+        self.cognitive_core = CognitiveCore(drone_id)
+        self.communication = CommunicationModule(drone_id)
+        
+        # Ініціалізація стану
+        self.cognitive_core.blackboard['current_position'] = initial_position
+        self.running = False
+        
+    def start(self):
+        """Запуск дрона"""
+        self.running = True
+        logger.info(f"Drone {self.drone_id} started at position {self.get_position()}")
+        
+    def stop(self):
+        """Зупинка дрона"""
+        self.running = False
+        logger.info(f"Drone {self.drone_id} stopped")
+        
+    def update(self):
+        """Основний цикл оновлення дрона"""
+        if not self.running:
+            return
+            
+        # Отримуємо інформацію про рій
+        swarm_info = self.communication.get_swarm_state()
+        
+        # Симуляція виявлення загроз (випадкове виявлення)
+        detected_threats = []
+        if np.random.random() < 0.01:  # 1% шанс виявити загрозу
+            threat_pos = Position(
+                self.get_position().x + np.random.uniform(-15, 15),
+                self.get_position().y + np.random.uniform(-15, 15),
+                self.get_position().z + np.random.uniform(-5, 5)
+            )
+            threat = ThreatInfo(
+                threat_id=f"threat_{int(time.time())}",
+                position=threat_pos,
+                threat_type="enemy_unit",
+                confidence=0.8,
+                detected_at=time.time()
+            )
+            detected_threats.append(threat)
+            logger.warning(f"Drone {self.drone_id}: Виявлено загрозу в позиції {threat_pos.x:.1f}, {threat_pos.y:.1f}")
+        
+        # Оновлення когнітивного ядра
+        self.cognitive_core.update(swarm_info, detected_threats)
+        
+        # Розсилання свого стану
+        drone_info = DroneInfo(
+            drone_id=self.drone_id,
+            position=self.get_position(),
+            state=self.cognitive_core.blackboard['state'],
+            battery_level=self.cognitive_core.blackboard['battery_level']
+        )
+        self.communication.broadcast_state(drone_info)
+        
+        # Симуляція споживання батареї
+        if self.cognitive_core.blackboard['battery_level'] > 0:
+            self.cognitive_core.blackboard['battery_level'] -= 0.05
+    
+    def get_position(self) -> Position:
+        """Отримання поточної позиції дрона"""
+        return self.cognitive_core.blackboard['current_position']
+    
+    def get_state(self) -> DroneState:
+        """Отримання поточного стану дрона"""
+        return self.cognitive_core.blackboard['state']
+    
+    def get_battery_level(self) -> float:
+        """Отримання рівня батареї"""
+        return self.cognitive_core.blackboard['battery_level']
+
+# ==================== SWARM COORDINATOR ====================
+
+class SwarmCoordinator:
+    """Координатор рою дронів"""
+    
+    def __init__(self):
+        self.drones: Dict[str, DroneAgent] = {}
+        self.running = False
+        
+    def add_drone(self, drone: DroneAgent):
+        """Додавання дрона до рою"""
+        self.drones[drone.drone_id] = drone
+        logger.info(f"Drone {drone.drone_id} added to swarm")
+        
+    def start_swarm(self):
+        """Запуск всього рою"""
+        self.running = True
+        for drone in self.drones.values():
+            drone.start()
+        logger.info(f"Swarm started with {len(self.drones)} drones")
+        
+    def stop_swarm(self):
+        """Зупинка всього рою"""
+        self.running = False
+        for drone in self.drones.values():
+            drone.stop()
+        logger.info("Swarm stopped")
+        
+    def update_swarm(self):
+        """Оновлення всього рою"""
+        if not self.running:
+            return
+            
+        # Оновлення кожного дрона
+        for drone in self.drones.values():
+            drone.update()
+        
+        # Симуляція обміну інформацією між дронами
+        for sender in self.drones.values():
+            sender_info = DroneInfo(
+                drone_id=sender.drone_id,
+                position=sender.get_position(),
+                state=sender.get_state(),
+                battery_level=sender.get_battery_level()
+            )
+            
+            for receiver in self.drones.values():
+                if receiver.drone_id != sender.drone_id:
+                    receiver.communication.receive_state_update(sender.drone_id, sender_info)
+    
+    def get_swarm_status(self) -> Dict[str, Dict]:
+        """Отримання статусу всього рою"""
+        status = {}
+        for drone_id, drone in self.drones.items():
+            pos = drone.get_position()
+            status[drone_id] = {
+                'position': (pos.x, pos.y, pos.z),
+                'state': drone.get_state().value,
+                'battery': drone.get_battery_level()
+            }
+        return status
+
+# ==================== SIMULATION ====================
+
+async def run_simulation():
+    """Запуск симуляції рою дронів"""
+    
+    # Створення координатора рою
+    swarm = SwarmCoordinator()
+    
+    # Створення дронів з різними початковими позиціями
+    initial_positions = [
+        Position(0, 0, 10),
+        Position(10, 0, 10),
+        Position(0, 10, 10),
+        Position(-10, 0, 10),
+        Position(0, -10, 10)
+    ]
+    
+    for i, pos in enumerate(initial_positions):
+        drone = DroneAgent(f"drone_{i+1}", pos)
+        swarm.add_drone(drone)
+    
+    # Запуск рою
+    swarm.start_swarm()
+    
+    try:
+        # Симуляція роботи протягом 100 ітерацій
+        for iteration in range(100):
+            swarm.update_swarm()
+            
+            # Виведення статусу кожні 10 ітерацій
+            if iteration % 10 == 0:
+                status = swarm.get_swarm_status()
+                print(f"\n=== Ітерація {iteration} ===")
+                for drone_id, info in status.items():
+                    pos = info['position']
+                    print(f"{drone_id}: Позиція({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}) "
+                          f"Стан: {info['state']} Батарея: {info['battery']:.1f}%")
+            
+            # Затримка для симуляції реального часу
+            await asyncio.sleep(0.1)
+            
+    except KeyboardInterrupt:
+        print("\nОтримано сигнал зупинки...")
+    finally:
+        swarm.stop_swarm()
+        print("Симуляція завершена")
+
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    print("Запуск бортової AI-платформи для рою дронів")
+    print("Натисніть Ctrl+C для зупинки симуляції")
+    
+    try:
+        asyncio.run(run_simulation())
+    except KeyboardInterrupt:
+        print("\nПрограма завершена користувачем")
